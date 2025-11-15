@@ -92,7 +92,10 @@ impl RespClient {
     ///
     /// Returns an error if the RESP protocol command fails or queue name doesn't match
     pub async fn brpop(&mut self, queue: &str, timeout: u64) -> AgwResult<Option<String>> {
-        debug!("Blocking pop from queue {} with timeout {}s", queue, timeout);
+        debug!(
+            "Blocking pop from queue {} with timeout {}s",
+            queue, timeout
+        );
 
         // BRPOP returns (key, value) tuple or nil on timeout
         let result: Option<(String, String)> = Cmd::new()
