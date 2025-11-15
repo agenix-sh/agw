@@ -46,3 +46,7 @@ path = "src/main.rs"
 strip = true
 lto = true
 codegen-units = 1
+overflow-checks = true
+
+[profile.dev]
+overflow-checks = true

@@ -156,7 +156,7 @@ profile = "default"
 ### `Cargo.toml` Requirements
 ```toml
 [package]
-rust-version = "1.82"  # Minimum Rust version
+rust-version = "1.83"  # Minimum Rust version
 edition = "2021"
 
 [profile.release]

@@ -20,7 +20,7 @@ Copy to repository root:
 ### 3. Cargo.toml Updates
 Add to `[package]` section:
 ```toml
-rust-version = "1.82"
+rust-version = "1.83"
 ```
 
 Add/update `[profile]` sections:

@@ -78,7 +78,7 @@ profile = "default"
 **Added:**
 ```toml
 [package]
-rust-version = "1.82"  # Minimum Rust version
+rust-version = "1.83"  # Minimum Rust version
 ```
 
 **Purpose:**
@@ -263,7 +263,7 @@ cp /path/to/agw/rust-toolchain.toml .
 find .github -type f -exec sed -i '' 's/AGW/AGX/g; s/agw/agx/g' {} +
 
 # Update Cargo.toml
-echo 'rust-version = "1.82"' # Add to [package]
+echo 'rust-version = "1.83"' # Add to [package]
 
 # Commit and push
 git add .github rust-toolchain.toml Cargo.toml
