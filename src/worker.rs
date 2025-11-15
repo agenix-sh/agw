@@ -1,7 +1,8 @@
 use crate::config::Config;
 use crate::error::{AgwError, AgwResult};
+use crate::job::Job;
 use crate::resp::RespClient;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 /// AGW Worker
@@ -49,30 +50,80 @@ impl Worker {
     ///
     /// # Errors
     ///
-    /// Returns an error if heartbeat fails or connection to AGQ is lost
+    /// Returns an error if heartbeat fails, job fetch fails, or connection to AGQ is lost
     pub async fn run(mut self) -> AgwResult<()> {
         info!("Worker {} starting main loop", self.id);
 
-        // Send initial heartbeat
+        // Main loop: fetch jobs and send heartbeats
+        let mut heartbeat_interval = tokio::time::interval(self.config.heartbeat_duration());
+
+        // Consume the first tick (which completes immediately) and send initial heartbeat
+        heartbeat_interval.tick().await;
         self.send_heartbeat().await?;
 
-        // Main heartbeat loop
-        let mut interval = tokio::time::interval(self.config.heartbeat_duration());
-
         loop {
-            interval.tick().await;
+            // Use tokio::select with biased mode to prioritize heartbeats
+            // This prevents DoS when jobs are continuously available
+            tokio::select! {
+                biased;
 
-            match self.send_heartbeat().await {
-                Ok(()) => {
-                    info!("Heartbeat sent successfully for worker {}", self.id);
+                // Heartbeat tick - checked first to ensure heartbeats are never missed
+                _ = heartbeat_interval.tick() => {
+                    match self.send_heartbeat().await {
+                        Ok(()) => {
+                            debug!("Heartbeat sent successfully for worker {}", self.id);
+                        }
+                        Err(e) => {
+                            error!("Failed to send heartbeat: {e}");
+                            warn!("Worker {} may need to reconnect", self.id);
+                            return Err(e);
+                        }
+                    }
                 }
-                Err(e) => {
-                    error!("Failed to send heartbeat: {e}");
-                    warn!("Worker {} may need to reconnect", self.id);
-                    // In a production version, we'd implement reconnection logic here
-                    return Err(e);
+
+                // Job fetch (with 5 second timeout to allow heartbeats)
+                job_result = self.fetch_job() => {
+                    match job_result {
+                        Ok(Some(job)) => {
+                            debug!("Received job {}: {} step {}", job.id, job.tool, job.step_number);
+                            // TODO: Execute job in AGW-006
+                            debug!("Job details: {:?}", job);
+                        }
+                        Ok(None) => {
+                            // Timeout - continue loop
+                            debug!("Job fetch timeout, continuing...");
+                        }
+                        Err(e) => {
+                            error!("Failed to fetch job: {e}");
+                            return Err(e);
+                        }
+                    }
                 }
             }
+        }
+    }
+
+    /// Fetch a job from the queue
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if BRPOP fails, job JSON is invalid, or validation fails
+    async fn fetch_job(&mut self) -> AgwResult<Option<Job>> {
+        const QUEUE_NAME: &str = "queue:ready";
+        const BRPOP_TIMEOUT: u64 = 5; // 5 second timeout to allow heartbeats
+
+        match self.client.brpop(QUEUE_NAME, BRPOP_TIMEOUT).await? {
+            Some(json) => {
+                // Parse JSON - sanitize error to avoid information disclosure
+                let job = Job::from_json(&json)
+                    .map_err(|_| AgwError::Worker("Invalid job JSON format".to_string()))?;
+
+                // Validate job fields for security
+                job.validate()?;
+
+                Ok(Some(job))
+            }
+            None => Ok(None),
         }
     }
 
