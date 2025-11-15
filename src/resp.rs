@@ -83,6 +83,35 @@ impl RespClient {
         Ok(())
     }
 
+    /// Blocking pop from queue using BRPOP
+    ///
+    /// Blocks until a job is available in the queue or timeout is reached.
+    /// Returns the job data as a JSON string, or None if timeout occurred.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RESP protocol command fails
+    pub async fn brpop(&mut self, queue: &str, timeout: u64) -> AgwResult<Option<String>> {
+        debug!("Blocking pop from queue {} with timeout {}s", queue, timeout);
+
+        // BRPOP returns (key, value) tuple or nil on timeout
+        let result: Option<(String, String)> = Cmd::new()
+            .arg("BRPOP")
+            .arg(queue)
+            .arg(timeout)
+            .query_async(&mut self.connection)
+            .await
+            .map_err(|e| AgwError::RespProtocol(format!("BRPOP failed: {e}")))?;
+
+        if let Some((_key, value)) = result {
+            debug!("Received job from queue {}: {} bytes", queue, value.len());
+            Ok(Some(value))
+        } else {
+            debug!("BRPOP timeout on queue {}", queue);
+            Ok(None)
+        }
+    }
+
     /// Get the underlying connection (for future operations)
     #[allow(dead_code)]
     pub fn connection(&mut self) -> &mut ConnectionManager {
