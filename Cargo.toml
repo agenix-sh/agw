@@ -1,0 +1,48 @@
+[package]
+name = "agw"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.83"
+authors = ["Agenix Team"]
+description = "AGW - Agentic Worker for the AGX ecosystem"
+license = "MIT"
+repository = "https://github.com/agenix-sh/agw"
+
+[dependencies]
+# CLI argument parsing
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Async runtime
+tokio = { version = "1.40", features = ["full"] }
+
+# RESP protocol
+redis = { version = "0.24", features = ["tokio-comp", "connection-manager"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# UUID generation
+uuid = { version = "1.10", features = ["v4"] }
+
+[dev-dependencies]
+# Testing utilities
+tokio-test = "0.4"
+mockall = "0.13"
+
+[[bin]]
+name = "agw"
+path = "src/main.rs"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
