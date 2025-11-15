@@ -1,3 +1,6 @@
+// Allow module inception for error types - this is a common Rust pattern
+#![allow(clippy::module_name_repetitions)]
+
 use thiserror::Error;
 
 #[derive(Error, Debug)]
