@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::error::{AgwError, AgwResult};
+use crate::executor;
 use crate::job::Job;
 use crate::resp::RespClient;
 use tracing::{debug, error, info, warn};
@@ -86,8 +87,25 @@ impl Worker {
                     match job_result {
                         Ok(Some(job)) => {
                             debug!("Received job {}: {} step {}", job.id, job.tool, job.step_number);
-                            // TODO: Execute job in AGW-006
-                            debug!("Job details: {:?}", job);
+
+                            // Execute the job
+                            match executor::execute_step(&job).await {
+                                Ok(result) => {
+                                    info!(
+                                        "Job {} completed: exit_code={}, stdout={} bytes, stderr={} bytes",
+                                        result.job_id,
+                                        result.exit_code,
+                                        result.stdout.len(),
+                                        result.stderr.len()
+                                    );
+                                    // TODO: Post result to AGQ in AGW-007
+                                    debug!("Execution result: {:?}", result);
+                                }
+                                Err(e) => {
+                                    error!("Failed to execute job {}: {e}", job.id);
+                                    // TODO: Post error to AGQ in AGW-007
+                                }
+                            }
                         }
                         Ok(None) => {
                             // Timeout - continue loop
