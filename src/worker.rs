@@ -81,7 +81,7 @@ impl Worker {
                 job_result = self.fetch_job() => {
                     match job_result {
                         Ok(Some(job)) => {
-                            info!("Received job {}: {} step {}", job.id, job.tool, job.step_number);
+                            debug!("Received job {}: {} step {}", job.id, job.tool, job.step_number);
                             // TODO: Execute job in AGW-006
                             debug!("Job details: {:?}", job);
                         }
@@ -103,15 +103,20 @@ impl Worker {
     ///
     /// # Errors
     ///
-    /// Returns an error if BRPOP fails or job JSON is invalid
+    /// Returns an error if BRPOP fails, job JSON is invalid, or validation fails
     async fn fetch_job(&mut self) -> AgwResult<Option<Job>> {
         const QUEUE_NAME: &str = "queue:ready";
         const BRPOP_TIMEOUT: u64 = 5; // 5 second timeout to allow heartbeats
 
         match self.client.brpop(QUEUE_NAME, BRPOP_TIMEOUT).await? {
             Some(json) => {
+                // Parse JSON - sanitize error to avoid information disclosure
                 let job = Job::from_json(&json)
-                    .map_err(|e| AgwError::Worker(format!("Invalid job JSON: {e}")))?;
+                    .map_err(|_| AgwError::Worker("Invalid job JSON format".to_string()))?;
+
+                // Validate job fields for security
+                job.validate()?;
+
                 Ok(Some(job))
             }
             None => Ok(None),
