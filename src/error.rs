@@ -21,6 +21,9 @@ pub enum AgwError {
     #[allow(dead_code)]
     Worker(String),
 
+    #[error("Executor error: {0}")]
+    Executor(String),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 

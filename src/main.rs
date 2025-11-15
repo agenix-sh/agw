@@ -5,6 +5,7 @@ use tracing_subscriber::FmtSubscriber;
 
 mod config;
 mod error;
+mod executor;
 mod job;
 mod resp;
 mod worker;
