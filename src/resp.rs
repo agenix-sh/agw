@@ -1,3 +1,6 @@
+// Allow module inception - this is a common Rust pattern for protocol clients
+#![allow(clippy::module_name_repetitions)]
+
 use crate::error::{AgwError, AgwResult};
 use redis::{aio::ConnectionManager, Client, Cmd};
 use tracing::{debug, info};
