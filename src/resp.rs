@@ -90,7 +90,7 @@ impl RespClient {
     ///
     /// # Errors
     ///
-    /// Returns an error if the RESP protocol command fails
+    /// Returns an error if the RESP protocol command fails or queue name doesn't match
     pub async fn brpop(&mut self, queue: &str, timeout: u64) -> AgwResult<Option<String>> {
         debug!("Blocking pop from queue {} with timeout {}s", queue, timeout);
 
@@ -103,7 +103,14 @@ impl RespClient {
             .await
             .map_err(|e| AgwError::RespProtocol(format!("BRPOP failed: {e}")))?;
 
-        if let Some((_key, value)) = result {
+        if let Some((returned_queue, value)) = result {
+            // Validate that the job came from the expected queue
+            if returned_queue != queue {
+                return Err(AgwError::RespProtocol(format!(
+                    "Job received from unexpected queue: expected '{queue}', got '{returned_queue}'"
+                )));
+            }
+
             debug!("Received job from queue {}: {} bytes", queue, value.len());
             Ok(Some(value))
         } else {

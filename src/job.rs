@@ -13,8 +13,23 @@ const MAX_COMMAND_LEN: usize = 4096;
 const MAX_ARGS_COUNT: usize = 256;
 /// Maximum length for a single argument
 const MAX_ARG_LEN: usize = 4096;
+/// Minimum timeout in seconds
+const MIN_TIMEOUT_SECS: u64 = 1;
 /// Maximum timeout in seconds (24 hours)
 const MAX_TIMEOUT_SECS: u64 = 86400;
+
+/// Dangerous Unicode characters (bidirectional overrides, zero-width)
+const DANGEROUS_UNICODE: &[char] = &[
+    '\u{202A}', // LEFT-TO-RIGHT EMBEDDING
+    '\u{202B}', // RIGHT-TO-LEFT EMBEDDING
+    '\u{202C}', // POP DIRECTIONAL FORMATTING
+    '\u{202D}', // LEFT-TO-RIGHT OVERRIDE
+    '\u{202E}', // RIGHT-TO-LEFT OVERRIDE
+    '\u{200B}', // ZERO WIDTH SPACE
+    '\u{200C}', // ZERO WIDTH NON-JOINER
+    '\u{200D}', // ZERO WIDTH JOINER
+    '\u{FEFF}', // ZERO WIDTH NO-BREAK SPACE
+];
 
 /// Job step to be executed by the worker
 ///
@@ -136,8 +151,10 @@ impl Job {
 
         // Validate timeout
         if let Some(timeout) = self.timeout {
-            if timeout == 0 {
-                return Err(AgwError::Worker("Timeout must be greater than 0".to_string()));
+            if timeout < MIN_TIMEOUT_SECS {
+                return Err(AgwError::Worker(format!(
+                    "Timeout must be at least {MIN_TIMEOUT_SECS} second(s)"
+                )));
             }
             if timeout > MAX_TIMEOUT_SECS {
                 return Err(AgwError::Worker(format!(
@@ -181,6 +198,15 @@ fn validate_string_field(
         )));
     }
 
+    // Check for dangerous Unicode characters (bidirectional overrides, zero-width)
+    for ch in DANGEROUS_UNICODE {
+        if value.contains(*ch) {
+            return Err(AgwError::Worker(format!(
+                "{field_name} contains dangerous Unicode character"
+            )));
+        }
+    }
+
     if alphanumeric_only
         && !value
             .chars()
@@ -206,8 +232,8 @@ fn check_for_dangerous_patterns(value: &str, field_name: &str) -> AgwResult<()> 
         }
     }
 
-    // Check for path traversal
-    if value.contains("..") {
+    // Check for path traversal - be precise to avoid false positives
+    if value.contains("../") || value.contains("..\\") || value.starts_with("..") {
         return Err(AgwError::Worker(format!(
             "{field_name} contains path traversal sequence"
         )));
@@ -476,6 +502,77 @@ mod tests {
             command: "echo".to_string(),
             args,
             timeout: None,
+        };
+        assert!(job.validate().is_err());
+    }
+
+    #[test]
+    fn test_job_validation_unicode_bidi_override() {
+        let job = Job {
+            id: "job-123".to_string(),
+            plan_id: "plan-456".to_string(),
+            step_number: 1,
+            tool: "unix".to_string(),
+            command: "echo \u{202E}danger".to_string(), // RIGHT-TO-LEFT OVERRIDE
+            args: Vec::new(),
+            timeout: None,
+        };
+        assert!(job.validate().is_err());
+    }
+
+    #[test]
+    fn test_job_validation_zero_width_characters() {
+        let job = Job {
+            id: "job-123".to_string(),
+            plan_id: "plan-456".to_string(),
+            step_number: 1,
+            tool: "unix".to_string(),
+            command: "echo\u{200B}hidden".to_string(), // ZERO WIDTH SPACE
+            args: Vec::new(),
+            timeout: None,
+        };
+        assert!(job.validate().is_err());
+    }
+
+    #[test]
+    fn test_job_validation_legitimate_dots() {
+        // This should PASS - "1..10" is legitimate (Ruby-style range)
+        let job = Job {
+            id: "job-123".to_string(),
+            plan_id: "plan-456".to_string(),
+            step_number: 1,
+            tool: "unix".to_string(),
+            command: "echo 1..10".to_string(),
+            args: Vec::new(),
+            timeout: None,
+        };
+        assert!(job.validate().is_ok());
+    }
+
+    #[test]
+    fn test_job_validation_path_traversal_with_slash() {
+        let job = Job {
+            id: "job-123".to_string(),
+            plan_id: "plan-456".to_string(),
+            step_number: 1,
+            tool: "unix".to_string(),
+            command: "cat ../etc/passwd".to_string(),
+            args: Vec::new(),
+            timeout: None,
+        };
+        assert!(job.validate().is_err());
+    }
+
+    #[test]
+    fn test_job_validation_zero_timeout() {
+        let job = Job {
+            id: "job-123".to_string(),
+            plan_id: "plan-456".to_string(),
+            step_number: 1,
+            tool: "unix".to_string(),
+            command: "echo hello".to_string(),
+            args: Vec::new(),
+            timeout: Some(0),
         };
         assert!(job.validate().is_err());
     }

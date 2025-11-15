@@ -62,9 +62,12 @@ impl Worker {
         self.send_heartbeat().await?;
 
         loop {
-            // Use tokio::select to handle both job fetching and heartbeat
+            // Use tokio::select with biased mode to prioritize heartbeats
+            // This prevents DoS when jobs are continuously available
             tokio::select! {
-                // Heartbeat tick
+                biased;
+
+                // Heartbeat tick - checked first to ensure heartbeats are never missed
                 _ = heartbeat_interval.tick() => {
                     match self.send_heartbeat().await {
                         Ok(()) => {
