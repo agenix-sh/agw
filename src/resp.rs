@@ -1,3 +1,6 @@
+// Allow module inception - this is a common Rust pattern for protocol clients
+#![allow(clippy::module_name_repetitions)]
+
 use crate::error::{AgwError, AgwResult};
 use redis::{aio::ConnectionManager, Client, Cmd};
 use tracing::{debug, info};
@@ -9,6 +12,10 @@ pub struct RespClient {
 
 impl RespClient {
     /// Create a new RESP client and connect to AGQ
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if connection fails or address is invalid
     pub async fn connect(address: &str) -> AgwResult<Self> {
         debug!("Connecting to AGQ at {}", address);
 
@@ -19,13 +26,13 @@ impl RespClient {
             ));
         }
 
-        let redis_url = format!("redis://{}", address);
+        let redis_url = format!("redis://{address}");
         let client = Client::open(redis_url)
-            .map_err(|e| AgwError::Connection(format!("Failed to create client: {}", e)))?;
+            .map_err(|e| AgwError::Connection(format!("Failed to create client: {e}")))?;
 
         let connection = ConnectionManager::new(client)
             .await
-            .map_err(|e| AgwError::Connection(format!("Failed to connect: {}", e)))?;
+            .map_err(|e| AgwError::Connection(format!("Failed to connect: {e}")))?;
 
         info!("Connected to AGQ at {}", address);
 
@@ -33,6 +40,10 @@ impl RespClient {
     }
 
     /// Authenticate with the AGQ server using session key
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if authentication fails or receives unexpected response
     pub async fn authenticate(&mut self, session_key: &str) -> AgwResult<()> {
         debug!("Authenticating with AGQ");
 
@@ -41,12 +52,11 @@ impl RespClient {
             .arg(session_key)
             .query_async(&mut self.connection)
             .await
-            .map_err(|e| AgwError::Authentication(format!("AUTH failed: {}", e)))?;
+            .map_err(|e| AgwError::Authentication(format!("AUTH failed: {e}")))?;
 
         if response != "OK" {
             return Err(AgwError::Authentication(format!(
-                "Unexpected AUTH response: {}",
-                response
+                "Unexpected AUTH response: {response}"
             )));
         }
 
@@ -55,17 +65,21 @@ impl RespClient {
     }
 
     /// Send a heartbeat to AGQ
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RESP protocol command fails
     pub async fn heartbeat(&mut self, worker_id: &str) -> AgwResult<()> {
-        debug!("Sending heartbeat for worker {}", worker_id);
+        debug!("Sending heartbeat for worker {worker_id}");
 
         let response: String = Cmd::new()
             .arg("PING")
             .arg(worker_id)
             .query_async(&mut self.connection)
             .await
-            .map_err(|e| AgwError::RespProtocol(format!("PING failed: {}", e)))?;
+            .map_err(|e| AgwError::RespProtocol(format!("PING failed: {e}")))?;
 
-        debug!("Heartbeat response: {}", response);
+        debug!("Heartbeat response: {response}");
         Ok(())
     }
 

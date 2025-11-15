@@ -15,3 +15,6 @@
 
 # Build scripts (temporary)
 build.sh
+
+# Temporary files
+tmp/

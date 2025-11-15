@@ -33,6 +33,10 @@ pub struct Config {
 
 impl Config {
     /// Validate configuration
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any configuration value is invalid
     pub fn validate(&self) -> anyhow::Result<()> {
         // Validate AGQ address format
         if !self.agq_address.contains(':') {
@@ -60,11 +64,13 @@ impl Config {
     }
 
     /// Get heartbeat interval as Duration
+    #[must_use]
     pub fn heartbeat_duration(&self) -> Duration {
         Duration::from_secs(self.heartbeat_interval)
     }
 
     /// Get connection timeout as Duration
+    #[must_use]
     #[allow(dead_code)]
     pub fn connection_timeout_duration(&self) -> Duration {
         Duration::from_secs(self.connection_timeout)
@@ -72,6 +78,10 @@ impl Config {
 }
 
 /// Validate session key format
+///
+/// # Errors
+///
+/// Returns an error if the session key is invalid
 pub fn validate_session_key(key: &str) -> anyhow::Result<()> {
     if key.is_empty() {
         anyhow::bail!("Session key cannot be empty");
@@ -82,7 +92,7 @@ pub fn validate_session_key(key: &str) -> anyhow::Result<()> {
     }
 
     // Check for control characters (null bytes, etc.)
-    if key.chars().any(|c| c.is_control()) {
+    if key.chars().any(char::is_control) {
         anyhow::bail!("Session key contains invalid characters");
     }
 
@@ -105,6 +115,10 @@ pub fn validate_session_key(key: &str) -> anyhow::Result<()> {
 }
 
 /// Validate worker ID format
+///
+/// # Errors
+///
+/// Returns an error if the worker ID is invalid
 pub fn validate_worker_id(id: &str) -> anyhow::Result<()> {
     if id.is_empty() {
         anyhow::bail!("Worker ID cannot be empty");
@@ -115,7 +129,7 @@ pub fn validate_worker_id(id: &str) -> anyhow::Result<()> {
     }
 
     // Check for control characters
-    if id.chars().any(|c| c.is_control()) {
+    if id.chars().any(char::is_control) {
         anyhow::bail!("Worker ID contains invalid characters");
     }
 
