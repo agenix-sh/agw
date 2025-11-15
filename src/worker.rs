@@ -7,12 +7,17 @@ use uuid::Uuid;
 /// AGW Worker
 pub struct Worker {
     config: Config,
-    worker_id: String,
+    id: String,
     client: RespClient,
 }
 
 impl Worker {
     /// Create a new worker instance
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if configuration validation fails, connection to AGQ fails,
+    /// or authentication fails
     pub async fn new(config: Config) -> AgwResult<Self> {
         // Validate configuration
         config
@@ -35,14 +40,18 @@ impl Worker {
 
         Ok(Self {
             config,
-            worker_id,
+            id: worker_id,
             client,
         })
     }
 
     /// Run the worker main loop
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if heartbeat fails or connection to AGQ is lost
     pub async fn run(mut self) -> AgwResult<()> {
-        info!("Worker {} starting main loop", self.worker_id);
+        info!("Worker {} starting main loop", self.id);
 
         // Send initial heartbeat
         self.send_heartbeat().await?;
@@ -54,12 +63,12 @@ impl Worker {
             interval.tick().await;
 
             match self.send_heartbeat().await {
-                Ok(_) => {
-                    info!("Heartbeat sent successfully for worker {}", self.worker_id);
+                Ok(()) => {
+                    info!("Heartbeat sent successfully for worker {}", self.id);
                 }
                 Err(e) => {
-                    error!("Failed to send heartbeat: {}", e);
-                    warn!("Worker {} may need to reconnect", self.worker_id);
+                    error!("Failed to send heartbeat: {e}");
+                    warn!("Worker {} may need to reconnect", self.id);
                     // In a production version, we'd implement reconnection logic here
                     return Err(e);
                 }
@@ -69,13 +78,14 @@ impl Worker {
 
     /// Send a heartbeat message to AGQ
     async fn send_heartbeat(&mut self) -> AgwResult<()> {
-        self.client.heartbeat(&self.worker_id).await
+        self.client.heartbeat(&self.id).await
     }
 
     /// Get the worker ID
+    #[must_use]
     #[allow(dead_code)]
     pub fn id(&self) -> &str {
-        &self.worker_id
+        &self.id
     }
 }
 
