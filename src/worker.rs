@@ -54,11 +54,12 @@ impl Worker {
     pub async fn run(mut self) -> AgwResult<()> {
         info!("Worker {} starting main loop", self.id);
 
-        // Send initial heartbeat
-        self.send_heartbeat().await?;
-
         // Main loop: fetch jobs and send heartbeats
         let mut heartbeat_interval = tokio::time::interval(self.config.heartbeat_duration());
+
+        // Consume the first tick (which completes immediately) and send initial heartbeat
+        heartbeat_interval.tick().await;
+        self.send_heartbeat().await?;
 
         loop {
             // Use tokio::select to handle both job fetching and heartbeat
