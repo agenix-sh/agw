@@ -3,6 +3,7 @@ use crate::error::{AgwError, AgwResult};
 use crate::executor;
 use crate::job::Job;
 use crate::resp::RespClient;
+use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -62,7 +63,18 @@ impl Worker {
         heartbeat_interval.tick().await;
         self.send_heartbeat().await?;
 
+        // Track currently executing job (if any)
+        let mut current_job: Option<JoinHandle<()>> = None;
+
         loop {
+            // Check if current job is complete (non-blocking)
+            if let Some(handle) = current_job.as_mut() {
+                if handle.is_finished() {
+                    debug!("Job execution task completed");
+                    current_job = None;
+                }
+            }
+
             // Use tokio::select with biased mode to prioritize heartbeats
             // This prevents DoS when jobs are continuously available
             tokio::select! {
@@ -83,29 +95,34 @@ impl Worker {
                 }
 
                 // Job fetch (with 5 second timeout to allow heartbeats)
-                job_result = self.fetch_job() => {
+                // Only fetch if not currently executing a job
+                job_result = self.fetch_job(), if current_job.is_none() => {
                     match job_result {
                         Ok(Some(job)) => {
                             debug!("Received job {}: {} step {}", job.id, job.tool, job.step_number);
 
-                            // Execute the job
-                            match executor::execute_step(&job).await {
-                                Ok(result) => {
-                                    info!(
-                                        "Job {} completed: exit_code={}, stdout={} bytes, stderr={} bytes",
-                                        result.job_id,
-                                        result.exit_code,
-                                        result.stdout.len(),
-                                        result.stderr.len()
-                                    );
-                                    // TODO: Post result to AGQ in AGW-007
-                                    debug!("Execution result: {:?}", result);
+                            // Spawn job execution on a separate task to allow heartbeats to continue
+                            let job_handle = tokio::spawn(async move {
+                                match executor::execute_step(&job).await {
+                                    Ok(result) => {
+                                        info!(
+                                            "Job {} completed: exit_code={}, stdout={} bytes, stderr={} bytes",
+                                            result.job_id,
+                                            result.exit_code,
+                                            result.stdout.len(),
+                                            result.stderr.len()
+                                        );
+                                        // TODO: Post result to AGQ in AGW-007
+                                        debug!("Execution result: {:?}", result);
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to execute job {}: {e}", job.id);
+                                        // TODO: Post error to AGQ in AGW-007
+                                    }
                                 }
-                                Err(e) => {
-                                    error!("Failed to execute job {}: {e}", job.id);
-                                    // TODO: Post error to AGQ in AGW-007
-                                }
-                            }
+                            });
+
+                            current_job = Some(job_handle);
                         }
                         Ok(None) => {
                             // Timeout - continue loop
