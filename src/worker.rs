@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::error::{AgwError, AgwResult};
 use crate::executor;
-use crate::job::Job;
+use crate::plan::Plan;
 use crate::resp::RespClient;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
@@ -94,42 +94,43 @@ impl Worker {
                     }
                 }
 
-                // Job fetch (with 5 second timeout to allow heartbeats)
-                // Only fetch if not currently executing a job
-                job_result = self.fetch_job(), if current_job.is_none() => {
-                    match job_result {
-                        Ok(Some(job)) => {
-                            debug!("Received job {}: {} step {}", job.id, job.tool, job.step_number);
+                // Plan fetch (with 5 second timeout to allow heartbeats)
+                // Only fetch if not currently executing a plan
+                plan_result = self.fetch_plan(), if current_job.is_none() => {
+                    match plan_result {
+                        Ok(Some(plan)) => {
+                            debug!("Received plan {} (job {}) with {} steps",
+                                plan.plan_id, plan.job_id, plan.steps.len());
 
-                            // Spawn job execution on a separate task to allow heartbeats to continue
-                            let job_handle = tokio::spawn(async move {
-                                match executor::execute_step(&job).await {
+                            // Spawn plan execution on a separate task to allow heartbeats to continue
+                            let plan_handle = tokio::spawn(async move {
+                                match executor::execute_plan(&plan).await {
                                     Ok(result) => {
                                         info!(
-                                            "Job {} completed: exit_code={}, stdout={} bytes, stderr={} bytes",
+                                            "Plan {} (job {}) completed: {} steps executed, success={}",
+                                            result.plan_id,
                                             result.job_id,
-                                            result.exit_code,
-                                            result.stdout.len(),
-                                            result.stderr.len()
+                                            result.step_results.len(),
+                                            result.success
                                         );
                                         // TODO: Post result to AGQ in AGW-007
-                                        debug!("Execution result: {:?}", result);
+                                        debug!("Plan execution result: {:?}", result);
                                     }
                                     Err(e) => {
-                                        error!("Failed to execute job {}: {e}", job.id);
+                                        error!("Failed to execute plan {}: {e}", plan.plan_id);
                                         // TODO: Post error to AGQ in AGW-007
                                     }
                                 }
                             });
 
-                            current_job = Some(job_handle);
+                            current_job = Some(plan_handle);
                         }
                         Ok(None) => {
                             // Timeout - continue loop
-                            debug!("Job fetch timeout, continuing...");
+                            debug!("Plan fetch timeout, continuing...");
                         }
                         Err(e) => {
-                            error!("Failed to fetch job: {e}");
+                            error!("Failed to fetch plan: {e}");
                             return Err(e);
                         }
                     }
@@ -138,25 +139,25 @@ impl Worker {
         }
     }
 
-    /// Fetch a job from the queue
+    /// Fetch a plan from the queue
     ///
     /// # Errors
     ///
-    /// Returns an error if BRPOP fails, job JSON is invalid, or validation fails
-    async fn fetch_job(&mut self) -> AgwResult<Option<Job>> {
+    /// Returns an error if BRPOP fails, plan JSON is invalid, or validation fails
+    async fn fetch_plan(&mut self) -> AgwResult<Option<Plan>> {
         const QUEUE_NAME: &str = "queue:ready";
         const BRPOP_TIMEOUT: u64 = 5; // 5 second timeout to allow heartbeats
 
         match self.client.brpop(QUEUE_NAME, BRPOP_TIMEOUT).await? {
             Some(json) => {
                 // Parse JSON - sanitize error to avoid information disclosure
-                let job = Job::from_json(&json)
-                    .map_err(|_| AgwError::Worker("Invalid job JSON format".to_string()))?;
+                let plan = Plan::from_json(&json)
+                    .map_err(|_| AgwError::Worker("Invalid plan JSON format".to_string()))?;
 
-                // Validate job fields for security
-                job.validate()?;
+                // Validate plan structure and all steps for security
+                plan.validate()?;
 
-                Ok(Some(job))
+                Ok(Some(plan))
             }
             None => Ok(None),
         }
