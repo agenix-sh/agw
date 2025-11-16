@@ -12,12 +12,12 @@ const MAX_PLAN_ID_LEN: usize = 128;
 const MAX_PLAN_DESCRIPTION_LEN: usize = 1024;
 /// Maximum length for command
 const MAX_COMMAND_LEN: usize = 4096;
-/// Maximum number of arguments per step
+/// Maximum number of arguments per task
 const MAX_ARGS_COUNT: usize = 256;
 /// Maximum length for a single argument
 const MAX_ARG_LEN: usize = 4096;
-/// Maximum number of steps in a plan
-const MAX_STEPS_COUNT: usize = 100;
+/// Maximum number of tasks in a plan
+const MAX_TASKS_COUNT: usize = 100;
 /// Minimum timeout in seconds
 const MIN_TIMEOUT_SECS: u32 = 1;
 /// Maximum timeout in seconds (24 hours)
@@ -36,10 +36,10 @@ const DANGEROUS_UNICODE: &[char] = &[
     '\u{FEFF}', // ZERO WIDTH NO-BREAK SPACE
 ];
 
-/// Execution plan containing multiple steps
+/// Execution plan containing multiple tasks
 ///
 /// Plans are fetched from AGQ via BRPOP on the `queue:ready` list.
-/// Each plan contains an ordered list of steps to execute sequentially.
+/// Each plan contains an ordered list of tasks to execute sequentially.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[allow(clippy::struct_field_names)] // Field names match schema specification
 pub struct Plan {
@@ -53,16 +53,16 @@ pub struct Plan {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_description: Option<String>,
 
-    /// Ordered list of steps to execute
-    pub steps: Vec<Step>,
+    /// Ordered list of tasks to execute
+    pub tasks: Vec<Task>,
 }
 
-/// A single step within an execution plan
+/// A single task within an execution plan
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[allow(clippy::struct_field_names)] // Field names match schema specification
-pub struct Step {
-    /// 1-based step number (must be contiguous)
-    pub step_number: u32,
+pub struct Task {
+    /// 1-based task number (must be contiguous)
+    pub task_number: u32,
 
     /// Command to execute (e.g., "sort", "uniq", "agx-ocr")
     pub command: String,
@@ -71,11 +71,11 @@ pub struct Step {
     #[serde(default)]
     pub args: Vec<String>,
 
-    /// Optional reference to a previous step whose stdout becomes this step's stdin
+    /// Optional reference to a previous task whose stdout becomes this task's stdin
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub input_from_step: Option<u32>,
+    pub input_from_task: Option<u32>,
 
-    /// Optional per-step timeout in seconds
+    /// Optional per-task timeout in seconds
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u32>,
 }
@@ -100,15 +100,15 @@ impl Plan {
         serde_json::to_string(self)
     }
 
-    /// Validate the plan structure and all steps
+    /// Validate the plan structure and all tasks
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - Any field contains dangerous patterns
-    /// - Steps are empty or exceed maximum count
-    /// - Step numbers are not contiguous starting at 1
-    /// - `input_from_step` references are invalid
+    /// - Tasks are empty or exceed maximum count
+    /// - Task numbers are not contiguous starting at 1
+    /// - `input_from_task` references are invalid
     pub fn validate(&self) -> AgwResult<()> {
         // Validate job_id
         validate_string_field(&self.job_id, "job_id", MAX_JOB_ID_LEN, true)?;
@@ -121,42 +121,42 @@ impl Plan {
             validate_string_field(desc, "plan_description", MAX_PLAN_DESCRIPTION_LEN, false)?;
         }
 
-        // Validate steps array
-        if self.steps.is_empty() {
+        // Validate tasks array
+        if self.tasks.is_empty() {
             return Err(AgwError::Worker(
-                "Plan must contain at least one step".to_string(),
+                "Plan must contain at least one task".to_string(),
             ));
         }
 
-        if self.steps.len() > MAX_STEPS_COUNT {
+        if self.tasks.len() > MAX_TASKS_COUNT {
             return Err(AgwError::Worker(format!(
-                "Plan exceeds maximum of {MAX_STEPS_COUNT} steps"
+                "Plan exceeds maximum of {MAX_TASKS_COUNT} tasks"
             )));
         }
 
-        // Validate step numbers are contiguous starting at 1
-        for (index, step) in self.steps.iter().enumerate() {
-            let expected_step_number = u32::try_from(index + 1)
-                .map_err(|_| AgwError::Worker("Step index overflow".to_string()))?;
-            if step.step_number != expected_step_number {
+        // Validate task numbers are contiguous starting at 1
+        for (index, task) in self.tasks.iter().enumerate() {
+            let expected_task_number = u32::try_from(index + 1)
+                .map_err(|_| AgwError::Worker("Task index overflow".to_string()))?;
+            if task.task_number != expected_task_number {
                 return Err(AgwError::Worker(format!(
-                    "Step numbers must be contiguous starting at 1: expected {expected_step_number}, got {}",
-                    step.step_number
+                    "Task numbers must be contiguous starting at 1: expected {expected_task_number}, got {}",
+                    task.task_number
                 )));
             }
 
-            // Validate the step itself
-            step.validate()?;
+            // Validate the task itself
+            task.validate()?;
 
-            // Validate input_from_step references
-            if let Some(ref_step) = step.input_from_step {
-                if ref_step == 0 {
-                    return Err(AgwError::Worker("input_from_step must be >= 1".to_string()));
+            // Validate input_from_task references
+            if let Some(ref_task) = task.input_from_task {
+                if ref_task == 0 {
+                    return Err(AgwError::Worker("input_from_task must be >= 1".to_string()));
                 }
-                if ref_step >= step.step_number {
+                if ref_task >= task.task_number {
                     return Err(AgwError::Worker(format!(
-                        "Step {} has invalid input_from_step {}: cannot reference self or future steps",
-                        step.step_number, ref_step
+                        "Task {} has invalid input_from_task {}: cannot reference self or future tasks",
+                        task.task_number, ref_task
                     )));
                 }
             }
@@ -166,8 +166,8 @@ impl Plan {
     }
 }
 
-impl Step {
-    /// Validate the step fields
+impl Task {
+    /// Validate the task fields
     ///
     /// # Errors
     ///
@@ -180,8 +180,8 @@ impl Step {
         // Validate arguments
         if self.args.len() > MAX_ARGS_COUNT {
             return Err(AgwError::Worker(format!(
-                "Step {} exceeds maximum of {MAX_ARGS_COUNT} arguments",
-                self.step_number
+                "Task {} exceeds maximum of {MAX_ARGS_COUNT} arguments",
+                self.task_number
             )));
         }
 
@@ -194,14 +194,14 @@ impl Step {
         if let Some(timeout) = self.timeout_secs {
             if timeout < MIN_TIMEOUT_SECS {
                 return Err(AgwError::Worker(format!(
-                    "Step {} timeout must be at least {MIN_TIMEOUT_SECS} seconds",
-                    self.step_number
+                    "Task {} timeout must be at least {MIN_TIMEOUT_SECS} seconds",
+                    self.task_number
                 )));
             }
             if timeout > MAX_TIMEOUT_SECS {
                 return Err(AgwError::Worker(format!(
-                    "Step {} timeout must not exceed {MAX_TIMEOUT_SECS} seconds",
-                    self.step_number
+                    "Task {} timeout must not exceed {MAX_TIMEOUT_SECS} seconds",
+                    self.task_number
                 )));
             }
         }
@@ -285,18 +285,18 @@ mod tests {
             job_id: "job-123".to_string(),
             plan_id: "plan-456".to_string(),
             plan_description: Some("Test plan".to_string()),
-            steps: vec![Step {
-                step_number: 1,
+            tasks: vec![Task {
+                task_number: 1,
                 command: "echo".to_string(),
                 args: vec!["hello".to_string()],
-                input_from_step: None,
+                input_from_task: None,
                 timeout_secs: Some(30),
             }],
         };
 
         assert_eq!(plan.job_id, "job-123");
         assert_eq!(plan.plan_id, "plan-456");
-        assert_eq!(plan.steps.len(), 1);
+        assert_eq!(plan.tasks.len(), 1);
     }
 
     #[test]
@@ -305,11 +305,11 @@ mod tests {
             job_id: "job-123".to_string(),
             plan_id: "plan-456".to_string(),
             plan_description: None,
-            steps: vec![Step {
-                step_number: 1,
+            tasks: vec![Task {
+                task_number: 1,
                 command: "ls".to_string(),
                 args: vec!["-la".to_string()],
-                input_from_step: None,
+                input_from_task: None,
                 timeout_secs: Some(30),
             }],
         };
@@ -325,26 +325,26 @@ mod tests {
             job_id: "job-123".to_string(),
             plan_id: "plan-456".to_string(),
             plan_description: Some("Multi-step plan".to_string()),
-            steps: vec![
-                Step {
-                    step_number: 1,
+            tasks: vec![
+                Task {
+                    task_number: 1,
                     command: "sort".to_string(),
                     args: vec!["-r".to_string()],
-                    input_from_step: None,
+                    input_from_task: None,
                     timeout_secs: Some(30),
                 },
-                Step {
-                    step_number: 2,
+                Task {
+                    task_number: 2,
                     command: "uniq".to_string(),
                     args: vec![],
-                    input_from_step: Some(1),
+                    input_from_task: Some(1),
                     timeout_secs: Some(30),
                 },
             ],
         };
 
-        assert_eq!(plan.steps.len(), 2);
-        assert_eq!(plan.steps[1].input_from_step, Some(1));
+        assert_eq!(plan.tasks.len(), 2);
+        assert_eq!(plan.tasks[1].input_from_task, Some(1));
     }
 
     #[test]
@@ -353,19 +353,19 @@ mod tests {
             job_id: "job-123".to_string(),
             plan_id: "plan-456".to_string(),
             plan_description: Some("Valid plan".to_string()),
-            steps: vec![
-                Step {
-                    step_number: 1,
+            tasks: vec![
+                Task {
+                    task_number: 1,
                     command: "echo".to_string(),
                     args: vec!["test".to_string()],
-                    input_from_step: None,
+                    input_from_task: None,
                     timeout_secs: Some(30),
                 },
-                Step {
-                    step_number: 2,
+                Task {
+                    task_number: 2,
                     command: "wc".to_string(),
                     args: vec!["-l".to_string()],
-                    input_from_step: Some(1),
+                    input_from_task: Some(1),
                     timeout_secs: Some(30),
                 },
             ],
@@ -380,7 +380,7 @@ mod tests {
             job_id: "job-123".to_string(),
             plan_id: "plan-456".to_string(),
             plan_description: None,
-            steps: vec![],
+            tasks: vec![],
         };
 
         assert!(plan.validate().is_err());
@@ -392,19 +392,19 @@ mod tests {
             job_id: "job-123".to_string(),
             plan_id: "plan-456".to_string(),
             plan_description: None,
-            steps: vec![
-                Step {
-                    step_number: 1,
+            tasks: vec![
+                Task {
+                    task_number: 1,
                     command: "echo".to_string(),
                     args: vec![],
-                    input_from_step: None,
+                    input_from_task: None,
                     timeout_secs: None,
                 },
-                Step {
-                    step_number: 3, // Skip 2
+                Task {
+                    task_number: 3, // Skip 2
                     command: "wc".to_string(),
                     args: vec![],
-                    input_from_step: None,
+                    input_from_task: None,
                     timeout_secs: None,
                 },
             ],
@@ -414,24 +414,24 @@ mod tests {
     }
 
     #[test]
-    fn test_plan_validation_invalid_input_from_step() {
+    fn test_plan_validation_invalid_input_from_task() {
         let plan = Plan {
             job_id: "job-123".to_string(),
             plan_id: "plan-456".to_string(),
             plan_description: None,
-            steps: vec![
-                Step {
-                    step_number: 1,
+            tasks: vec![
+                Task {
+                    task_number: 1,
                     command: "echo".to_string(),
                     args: vec![],
-                    input_from_step: None,
+                    input_from_task: None,
                     timeout_secs: None,
                 },
-                Step {
-                    step_number: 2,
+                Task {
+                    task_number: 2,
                     command: "wc".to_string(),
                     args: vec![],
-                    input_from_step: Some(2), // Cannot reference self
+                    input_from_task: Some(2), // Cannot reference self
                     timeout_secs: None,
                 },
             ],
@@ -442,11 +442,11 @@ mod tests {
 
     #[test]
     fn test_step_validation_command_injection() {
-        let step = Step {
-            step_number: 1,
+        let step = Task {
+            task_number: 1,
             command: "ls; rm -rf /".to_string(),
             args: vec![],
-            input_from_step: None,
+            input_from_task: None,
             timeout_secs: None,
         };
 
@@ -455,11 +455,11 @@ mod tests {
 
     #[test]
     fn test_step_validation_timeout_too_low() {
-        let step = Step {
-            step_number: 1,
+        let step = Task {
+            task_number: 1,
             command: "sleep".to_string(),
             args: vec!["10".to_string()],
-            input_from_step: None,
+            input_from_task: None,
             timeout_secs: Some(0),
         };
 

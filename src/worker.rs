@@ -99,18 +99,18 @@ impl Worker {
                 plan_result = self.fetch_plan(), if current_job.is_none() => {
                     match plan_result {
                         Ok(Some(plan)) => {
-                            debug!("Received plan {} (job {}) with {} steps",
-                                plan.plan_id, plan.job_id, plan.steps.len());
+                            debug!("Received plan {} (job {}) with {} tasks",
+                                plan.plan_id, plan.job_id, plan.tasks.len());
 
                             // Spawn plan execution on a separate task to allow heartbeats to continue
                             let plan_handle = tokio::spawn(async move {
                                 match executor::execute_plan(&plan).await {
                                     Ok(result) => {
                                         info!(
-                                            "Plan {} (job {}) completed: {} steps executed, success={}",
+                                            "Plan {} (job {}) completed: {} tasks executed, success={}",
                                             result.plan_id,
                                             result.job_id,
-                                            result.step_results.len(),
+                                            result.task_results.len(),
                                             result.success
                                         );
                                         // TODO: Post result to AGQ in AGW-007
@@ -154,7 +154,7 @@ impl Worker {
                 let plan = Plan::from_json(&json)
                     .map_err(|_| AgwError::Worker("Invalid plan JSON format".to_string()))?;
 
-                // Validate plan structure and all steps for security
+                // Validate plan structure and all tasks for security
                 plan.validate()?;
 
                 Ok(Some(plan))
