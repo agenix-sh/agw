@@ -8,10 +8,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tracing::{debug, error, info, warn};
 
-/// Result of a single step execution
+/// Result of a single task execution
 #[derive(Debug, Clone, PartialEq)]
 pub struct TaskResult {
-    /// Step number that was executed
+    /// Task number that was executed
     pub task_number: u32,
     /// Standard output from the command
     pub stdout: String,
@@ -30,14 +30,14 @@ pub struct PlanResult {
     pub job_id: String,
     /// Plan ID
     pub plan_id: String,
-    /// Results from each step that was executed
+    /// Results from each task that was executed
     pub task_results: Vec<TaskResult>,
-    /// Whether all steps succeeded
+    /// Whether all tasks succeeded
     pub success: bool,
 }
 
 impl TaskResult {
-    /// Create a new step result
+    /// Create a new task result
     #[must_use]
     pub fn new(task_number: u32, stdout: String, stderr: String, exit_code: i32) -> Self {
         Self {
@@ -137,7 +137,7 @@ pub async fn execute_plan(plan: &Plan) -> AgwResult<PlanResult> {
     Ok(plan_result)
 }
 
-/// Execute a single step as a subprocess
+/// Execute a single task as a subprocess
 ///
 /// # Errors
 ///
@@ -368,7 +368,7 @@ mod tests {
         };
 
         let result = execute_plan(&plan).await.unwrap();
-        // Should only execute first step
+        // Should only execute first task
         assert_eq!(result.task_results.len(), 1);
         assert_eq!(result.task_results[0].exit_code, 42);
         assert!(!result.task_results[0].success);

@@ -375,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn test_plan_validation_empty_steps() {
+    fn test_plan_validation_empty_tasks() {
         let plan = Plan {
             job_id: "job-123".to_string(),
             plan_id: "plan-456".to_string(),
@@ -387,7 +387,7 @@ mod tests {
     }
 
     #[test]
-    fn test_plan_validation_non_contiguous_steps() {
+    fn test_plan_validation_non_contiguous_tasks() {
         let plan = Plan {
             job_id: "job-123".to_string(),
             plan_id: "plan-456".to_string(),
@@ -441,8 +441,8 @@ mod tests {
     }
 
     #[test]
-    fn test_step_validation_command_injection() {
-        let step = Task {
+    fn test_task_validation_command_injection() {
+        let task = Task {
             task_number: 1,
             command: "ls; rm -rf /".to_string(),
             args: vec![],
@@ -450,12 +450,12 @@ mod tests {
             timeout_secs: None,
         };
 
-        assert!(step.validate().is_err());
+        assert!(task.validate().is_err());
     }
 
     #[test]
-    fn test_step_validation_timeout_too_low() {
-        let step = Task {
+    fn test_task_validation_timeout_too_low() {
+        let task = Task {
             task_number: 1,
             command: "sleep".to_string(),
             args: vec!["10".to_string()],
@@ -463,6 +463,6 @@ mod tests {
             timeout_secs: Some(0),
         };
 
-        assert!(step.validate().is_err());
+        assert!(task.validate().is_err());
     }
 }
