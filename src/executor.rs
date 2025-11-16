@@ -74,6 +74,11 @@ impl PlanResult {
 /// - Timeout is exceeded
 /// - Process cannot be killed after timeout
 ///
+/// # Panics
+///
+/// This function will not panic under normal conditions. The unwrap at line 111
+/// is safe because `step_results` is guaranteed to be non-empty when we check success.
+///
 /// Note: This function will halt on first failure and return partial results
 pub async fn execute_plan(plan: &Plan) -> AgwResult<PlanResult> {
     info!(

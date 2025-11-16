@@ -41,6 +41,7 @@ const DANGEROUS_UNICODE: &[char] = &[
 /// Plans are fetched from AGQ via BRPOP on the `queue:ready` list.
 /// Each plan contains an ordered list of steps to execute sequentially.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[allow(clippy::struct_field_names)] // Field names match schema specification
 pub struct Plan {
     /// Unique job identifier for this execution instance
     pub job_id: String,
@@ -58,6 +59,7 @@ pub struct Plan {
 
 /// A single step within an execution plan
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[allow(clippy::struct_field_names)] // Field names match schema specification
 pub struct Step {
     /// 1-based step number (must be contiguous)
     pub step_number: u32,
@@ -106,7 +108,7 @@ impl Plan {
     /// - Any field contains dangerous patterns
     /// - Steps are empty or exceed maximum count
     /// - Step numbers are not contiguous starting at 1
-    /// - input_from_step references are invalid
+    /// - `input_from_step` references are invalid
     pub fn validate(&self) -> AgwResult<()> {
         // Validate job_id
         validate_string_field(&self.job_id, "job_id", MAX_JOB_ID_LEN, true)?;
@@ -134,7 +136,8 @@ impl Plan {
 
         // Validate step numbers are contiguous starting at 1
         for (index, step) in self.steps.iter().enumerate() {
-            let expected_step_number = (index + 1) as u32;
+            let expected_step_number = u32::try_from(index + 1)
+                .map_err(|_| AgwError::Worker("Step index overflow".to_string()))?;
             if step.step_number != expected_step_number {
                 return Err(AgwError::Worker(format!(
                     "Step numbers must be contiguous starting at 1: expected {expected_step_number}, got {}",
