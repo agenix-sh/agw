@@ -17,6 +17,46 @@ AGW is the worker component of the AGX ecosystem - a stateless Rust binary that 
 
 ---
 
+## Nomenclature (CRITICAL)
+
+AGW uses precise terminology defined in `docs/EXECUTION-LAYERS.md`:
+
+### 1. Task (Atomic execution unit)
+- Single tool/AU call: `stdin → tool → stdout`
+- Example: `sort -r`, `agx-ocr image.png`
+- Executed by AGW
+- **Code**: `Task` struct in `src/plan.rs`
+
+### 2. Plan (Ordered list of Tasks)
+- JSON structure with ordered tasks
+- Reusable definition (stored in AGQ)
+- Example: "Extract text from image, then summarize"
+- Created by AGX
+- **Code**: `Plan` struct in `src/plan.rs`
+
+### 3. Job (Execution of a Plan with specific data)
+- Runtime instance of a Plan
+- Has unique `job_id`, references `plan_id`
+- Contains input data to process
+- Tracked by AGQ, executed by single AGW
+- Has status, timestamps, logs
+- **Code**: `Job` struct (to be implemented in AGW-012)
+
+### 4. Action (Many Jobs in parallel)
+- Fan-out execution of same Plan with different inputs
+- Created by User/AGX
+- Managed by AGQ
+- Executed by many AGWs (one Job per AGW)
+- **Status**: Not yet implemented
+
+### 5. Workflow (Future)
+- Multi-step orchestration with conditional logic
+- **Status**: Not yet implemented
+
+**IMPORTANT**: Always use these exact terms in code, comments, and documentation. Do not use "step" (use "task"), do not conflate "plan" with "job".
+
+---
+
 ## Development Workflow
 
 ### 1. Starting Work on an Issue
