@@ -2,6 +2,8 @@
 
 **AGW** is the worker component of the AGX ecosystem - a stateless Rust binary that executes deterministic plan steps.
 
+**For comprehensive architecture documentation, execution layer specifications, and development guidelines, see the [AGEniX central repository](https://github.com/agenix-sh/agenix).**
+
 ## Overview
 
 AGW pulls jobs from AGQ (the queue/scheduler), executes Unix and agent tools, and reports results back. It's designed for:
