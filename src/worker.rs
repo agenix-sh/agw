@@ -85,20 +85,28 @@ impl Worker {
         // Track currently executing job (if any)
         let mut current_job: Option<JoinHandle<()>> = None;
 
-        // Shutdown flag
+        // Shutdown flag (Unix only - Windows doesn't have signal handlers yet)
+        #[cfg(unix)]
         let mut shutdown_requested = false;
 
         loop {
-            // Check if shutdown was requested and no job is running
+            // Check if shutdown was requested and no job is running (Unix only)
+            #[cfg(unix)]
             if shutdown_requested && current_job.is_none() {
                 info!("Shutdown complete - no jobs running");
                 break;
             }
 
             // Check if current job is complete (non-blocking)
+            // If finished, await the handle to detect panics and ensure cleanup
             if let Some(handle) = current_job.as_mut() {
                 if handle.is_finished() {
                     debug!("Job execution task completed");
+                    // Await the handle to catch any panics and ensure proper cleanup
+                    // This prevents silently ignoring panicked tasks during normal operation
+                    if let Err(e) = handle.await {
+                        error!("Job execution task panicked: {e}");
+                    }
                     current_job = None;
                 }
             }
@@ -187,8 +195,8 @@ impl Worker {
                         }
                     }
 
-                    // Plan fetch
-                    plan_result = self.fetch_plan(), if current_job.is_none() && !shutdown_requested => {
+                    // Plan fetch (no shutdown handling on Windows yet)
+                    plan_result = self.fetch_plan(), if current_job.is_none() => {
                         match plan_result {
                             Ok(Some(plan)) => {
                                 debug!("Received plan {} (job {}) with {} tasks",
@@ -215,9 +223,31 @@ impl Worker {
 
         // Graceful shutdown: wait for current job to complete if still running
         if let Some(handle) = current_job {
-            info!("Waiting for current job to complete before shutdown");
-            if let Err(e) = handle.await {
-                error!("Job execution task panicked during shutdown: {e}");
+            if let Some(timeout) = self.config.shutdown_timeout_duration() {
+                info!(
+                    "Waiting up to {:?} for current job to complete before shutdown",
+                    timeout
+                );
+                match tokio::time::timeout(timeout, handle).await {
+                    Ok(Ok(())) => {
+                        info!("Job completed successfully before shutdown");
+                    }
+                    Ok(Err(e)) => {
+                        error!("Job execution task panicked during shutdown: {e}");
+                    }
+                    Err(_) => {
+                        error!(
+                            "Job did not complete within {:?}, forcing shutdown. \
+                             Job results may be incomplete.",
+                            timeout
+                        );
+                    }
+                }
+            } else {
+                info!("Waiting for current job to complete before shutdown (no timeout)");
+                if let Err(e) = handle.await {
+                    error!("Job execution task panicked during shutdown: {e}");
+                }
             }
         }
 
