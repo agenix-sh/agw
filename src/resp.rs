@@ -89,6 +89,36 @@ impl RespClient {
         Ok(())
     }
 
+    /// Register worker's available tools with AGQ
+    ///
+    /// Stores the tool list in the `worker:<id>:tools` key as a comma-separated string.
+    /// This enables AGQ to perform capability-based job routing in the future.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RESP protocol command fails
+    pub async fn register_tools(&mut self, worker_id: &str, tools: &[String]) -> AgwResult<()> {
+        if tools.is_empty() {
+            debug!("No tools to register for worker {}", worker_id);
+            return Ok(());
+        }
+
+        let key = format!("worker:{}:tools", worker_id);
+        let value = tools.join(",");
+
+        info!(
+            "Registering {} tools for worker {}: {}",
+            tools.len(),
+            worker_id,
+            value
+        );
+
+        self.set(&key, &value).await?;
+
+        info!("Successfully registered tools for worker {}", worker_id);
+        Ok(())
+    }
+
     /// Blocking pop from queue using BRPOP
     ///
     /// Blocks until a job is available in the queue or timeout is reached.
@@ -374,5 +404,38 @@ mod tests {
         for job_id in invalid_job_ids {
             assert!(job_id.is_empty() || job_id.contains(':'));
         }
+    }
+
+    #[test]
+    fn test_tool_list_formatting() {
+        // Test that tools are formatted correctly for storage
+        let tools = vec![
+            "sort".to_string(),
+            "grep".to_string(),
+            "agx-ocr".to_string(),
+        ];
+        let formatted = tools.join(",");
+        assert_eq!(formatted, "sort,grep,agx-ocr");
+
+        // Test empty tools list
+        let empty_tools: Vec<String> = vec![];
+        let formatted_empty = empty_tools.join(",");
+        assert_eq!(formatted_empty, "");
+    }
+
+    #[test]
+    fn test_worker_tools_key_format() {
+        // Test that worker tools key is formatted correctly
+        let worker_id = "worker-123";
+        let key = format!("worker:{}:tools", worker_id);
+        assert_eq!(key, "worker:worker-123:tools");
+
+        // UUID format
+        let uuid_worker = "550e8400-e29b-41d4-a716-446655440000";
+        let uuid_key = format!("worker:{}:tools", uuid_worker);
+        assert_eq!(
+            uuid_key,
+            "worker:550e8400-e29b-41d4-a716-446655440000:tools"
+        );
     }
 }

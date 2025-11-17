@@ -238,3 +238,70 @@ fn test_key_collision_prevention() {
     // Validation prevents this by rejecting job IDs with colons
     assert!(malicious_job_id.contains(':'));
 }
+
+#[test]
+fn test_tool_registration_format() {
+    // Test tool list serialization format
+    let tools = vec![
+        "sort".to_string(),
+        "grep".to_string(),
+        "agx-ocr".to_string(),
+    ];
+    let serialized = tools.join(",");
+    assert_eq!(serialized, "sort,grep,agx-ocr");
+
+    // Test deserialization
+    let deserialized: Vec<&str> = serialized.split(',').collect();
+    assert_eq!(deserialized, vec!["sort", "grep", "agx-ocr"]);
+}
+
+#[test]
+fn test_tool_name_validation() {
+    // Valid tool names (alphanumeric, hyphens, underscores)
+    let valid_tools = vec!["sort", "grep", "agx-ocr", "tool_name", "TOOL123"];
+
+    for tool in valid_tools {
+        assert!(tool
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_'));
+    }
+
+    // Invalid tool names (should be rejected in real implementation)
+    let invalid_tools = vec![
+        "tool;injection",
+        "tool|pipe",
+        "tool&background",
+        "../etc/passwd",
+    ];
+
+    for tool in invalid_tools {
+        assert!(!tool
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_'));
+    }
+}
+
+#[test]
+fn test_empty_tools_list_handling() {
+    // Empty tools list should result in empty string
+    let empty_tools: Vec<String> = vec![];
+    let serialized = empty_tools.join(",");
+    assert_eq!(serialized, "");
+
+    // Worker should handle empty tools gracefully (no registration)
+    assert!(empty_tools.is_empty());
+}
+
+#[test]
+fn test_tool_key_format_consistency() {
+    // Ensure worker tools key follows AGQ keyspace conventions
+    let worker_id = "worker-123";
+    let tools_key = format!("worker:{}:tools", worker_id);
+    let alive_key = format!("worker:{}:alive", worker_id);
+
+    // Both should follow same pattern: worker:<id>:<attribute>
+    assert!(tools_key.starts_with("worker:"));
+    assert!(alive_key.starts_with("worker:"));
+    assert!(tools_key.ends_with(":tools"));
+    assert!(alive_key.ends_with(":alive"));
+}

@@ -41,6 +41,16 @@ impl Worker {
         // Authenticate
         client.authenticate(&config.session_key).await?;
 
+        // Register available tools with AGQ
+        let tools = config.tools.clone().unwrap_or_else(|| {
+            info!("No tools specified, auto-discovery not yet implemented");
+            vec![]
+        });
+
+        if !tools.is_empty() {
+            client.register_tools(&worker_id, &tools).await?;
+        }
+
         Ok(Self {
             config,
             id: worker_id,

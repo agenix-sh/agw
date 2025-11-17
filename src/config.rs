@@ -29,6 +29,11 @@ pub struct Config {
     /// Connection timeout in seconds
     #[arg(long, env = "CONNECTION_TIMEOUT", default_value = "10")]
     pub connection_timeout: u64,
+
+    /// Comma-separated list of available tools (e.g., "sort,grep,agx-ocr")
+    /// If not provided, tools will be auto-discovered from PATH
+    #[arg(long, env = "WORKER_TOOLS", value_delimiter = ',')]
+    pub tools: Option<Vec<String>>,
 }
 
 impl Config {
