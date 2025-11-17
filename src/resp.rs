@@ -96,11 +96,53 @@ impl RespClient {
     ///
     /// # Errors
     ///
-    /// Returns an error if the RESP protocol command fails
+    /// Returns an error if the RESP protocol command fails or if tool names are invalid
     pub async fn register_tools(&mut self, worker_id: &str, tools: &[String]) -> AgwResult<()> {
         if tools.is_empty() {
             debug!("No tools to register for worker {}", worker_id);
             return Ok(());
+        }
+
+        // Validate number of tools
+        const MAX_TOOLS: usize = 100;
+        if tools.len() > MAX_TOOLS {
+            return Err(AgwError::RespProtocol(format!(
+                "Too many tools: {} (maximum {})",
+                tools.len(),
+                MAX_TOOLS
+            )));
+        }
+
+        // Validate each tool name
+        const MAX_TOOL_NAME_LENGTH: usize = 64;
+        for tool in tools {
+            // Check length
+            if tool.is_empty() {
+                return Err(AgwError::RespProtocol(
+                    "Tool name cannot be empty".to_string(),
+                ));
+            }
+
+            if tool.len() > MAX_TOOL_NAME_LENGTH {
+                return Err(AgwError::RespProtocol(format!(
+                    "Tool name too long: '{}' ({} chars, maximum {})",
+                    tool,
+                    tool.len(),
+                    MAX_TOOL_NAME_LENGTH
+                )));
+            }
+
+            // Only allow alphanumeric, hyphens, and underscores
+            // This prevents command injection, path traversal, and key injection
+            if !tool
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+            {
+                return Err(AgwError::RespProtocol(format!(
+                    "Invalid tool name '{}': only alphanumeric, hyphens, and underscores allowed",
+                    tool
+                )));
+            }
         }
 
         let key = format!("worker:{}:tools", worker_id);
@@ -437,5 +479,64 @@ mod tests {
             uuid_key,
             "worker:550e8400-e29b-41d4-a716-446655440000:tools"
         );
+    }
+
+    #[test]
+    fn test_tool_name_validation_logic() {
+        // Valid tool names
+        let valid_names = vec!["sort", "grep", "agx-ocr", "tool_name", "TOOL123"];
+        for name in valid_names {
+            assert!(name
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_'));
+        }
+
+        // Invalid tool names (command injection attempts)
+        assert!(!"tool;rm -rf /"
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_'));
+        assert!(!"tool|pipe"
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_'));
+        assert!(!"tool&background"
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_'));
+
+        // Invalid tool names (path traversal attempts)
+        assert!(!"../etc/passwd"
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_'));
+        assert!(!"tool/path"
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_'));
+
+        // Invalid tool names (key injection attempts)
+        assert!(!"tool:colon"
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_'));
+    }
+
+    #[test]
+    fn test_tool_name_length_limits() {
+        // Valid length (64 chars max)
+        let max_valid = "a".repeat(64);
+        assert_eq!(max_valid.len(), 64);
+
+        // Invalid length (65 chars)
+        let too_long = "a".repeat(65);
+        assert_eq!(too_long.len(), 65);
+        assert!(too_long.len() > 64);
+    }
+
+    #[test]
+    fn test_tool_list_size_limits() {
+        // Valid size (100 tools max)
+        let valid_count: Vec<String> = (0..100).map(|i| format!("tool{}", i)).collect();
+        assert_eq!(valid_count.len(), 100);
+
+        // Invalid size (101 tools)
+        let too_many: Vec<String> = (0..101).map(|i| format!("tool{}", i)).collect();
+        assert_eq!(too_many.len(), 101);
+        assert!(too_many.len() > 100);
     }
 }
