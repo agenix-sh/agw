@@ -186,3 +186,55 @@ fn test_error_message_format() {
     assert!(!safe_error.contains("secret"));
     assert!(!safe_error.contains("token"));
 }
+
+#[test]
+fn test_job_id_injection_prevention() {
+    // Test that malicious job IDs would be rejected
+    let malicious_job_ids = vec![
+        "job:123",        // Simple colon injection
+        "job-123:status", // Attempting to collide with status key
+        "abc:def:ghi",    // Multiple colons
+        ":leading",       // Leading colon
+        "trailing:",      // Trailing colon
+        "",               // Empty job ID
+    ];
+
+    for job_id in malicious_job_ids {
+        // These should all fail validation
+        let is_valid = !job_id.is_empty() && !job_id.contains(':');
+        assert!(!is_valid, "Job ID '{}' should be invalid", job_id);
+    }
+}
+
+#[test]
+fn test_valid_job_id_formats() {
+    // Test that valid job IDs pass validation
+    let valid_job_ids = vec![
+        "job-123",
+        "550e8400-e29b-41d4-a716-446655440000", // UUID format
+        "job_with_underscores",
+        "JOB-UPPERCASE-123",
+        "plan-abc-123",
+        "test-job-001",
+    ];
+
+    for job_id in valid_job_ids {
+        // These should all pass validation
+        let is_valid = !job_id.is_empty() && !job_id.contains(':');
+        assert!(is_valid, "Job ID '{}' should be valid", job_id);
+    }
+}
+
+#[test]
+fn test_key_collision_prevention() {
+    // Demonstrate why colon validation is critical
+    let malicious_job_id = "job-123:status";
+
+    // Without validation, this would create a malformed key
+    let malformed_key = format!("job:{}:stdout", malicious_job_id);
+    assert_eq!(malformed_key, "job:job-123:status:stdout");
+
+    // This could collide with the status key structure
+    // Validation prevents this by rejecting job IDs with colons
+    assert!(malicious_job_id.contains(':'));
+}

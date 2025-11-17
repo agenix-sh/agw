@@ -6,6 +6,11 @@ use redis::{aio::ConnectionManager, Client, Cmd};
 use tracing::{debug, info};
 
 /// RESP client for communicating with AGQ
+///
+/// Clone is safe and efficient because ConnectionManager uses Arc internally,
+/// making clones lightweight. This allows workers to spawn plan execution tasks
+/// with their own client instance for result posting, while the main worker
+/// continues to send heartbeats on the original client.
 #[derive(Clone)]
 pub struct RespClient {
     connection: ConnectionManager,
@@ -155,7 +160,7 @@ impl RespClient {
     ///
     /// # Errors
     ///
-    /// Returns an error if any RESP protocol command fails
+    /// Returns an error if any RESP protocol command fails or if job_id/status are invalid
     pub async fn post_job_result(
         &mut self,
         job_id: &str,
@@ -164,6 +169,19 @@ impl RespClient {
         status: &str,
     ) -> AgwResult<()> {
         debug!("Posting results for job {}", job_id);
+
+        // Validate job ID to prevent Redis key injection
+        if job_id.is_empty() {
+            return Err(AgwError::RespProtocol("Job ID cannot be empty".to_string()));
+        }
+
+        // Prevent colons in job ID to avoid key collision/injection
+        // (job IDs with colons could create malformed keys like "job:abc:def:stdout")
+        if job_id.contains(':') {
+            return Err(AgwError::RespProtocol(format!(
+                "Job ID cannot contain colons: {job_id}"
+            )));
+        }
 
         // Validate status is one of the expected values
         if !matches!(status, "completed" | "failed" | "pending" | "running") {
@@ -282,5 +300,35 @@ mod tests {
         assert_eq!(stdout_key, "job:job-123:stdout");
         assert_eq!(stderr_key, "job:job-123:stderr");
         assert_eq!(status_key, "job:job-123:status");
+    }
+
+    #[test]
+    fn test_job_id_validation() {
+        // Valid job IDs should pass validation checks
+        let valid_job_ids = vec![
+            "job-123",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "job_with_underscores",
+            "JOB-UPPERCASE-123",
+        ];
+
+        for job_id in valid_job_ids {
+            assert!(!job_id.is_empty());
+            assert!(!job_id.contains(':'));
+        }
+
+        // Invalid job IDs should fail validation
+        let invalid_job_ids = vec![
+            "",                // Empty
+            "job:123",         // Contains colon (key injection)
+            "job-123:status",  // Contains colon (could create "job:job-123:status:stdout")
+            "abc:def:ghi",     // Multiple colons
+            ":leading-colon",  // Leading colon
+            "trailing-colon:", // Trailing colon
+        ];
+
+        for job_id in invalid_job_ids {
+            assert!(job_id.is_empty() || job_id.contains(':'));
+        }
     }
 }

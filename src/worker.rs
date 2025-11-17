@@ -117,23 +117,12 @@ impl Worker {
                                             result.success
                                         );
 
-                                        // Combine stdout and stderr from all tasks
-                                        let combined_stdout = result.task_results.iter()
-                                            .map(|r| r.stdout.as_str())
-                                            .collect::<Vec<_>>()
-                                            .join("\n");
-                                        let combined_stderr = result.task_results.iter()
-                                            .map(|r| r.stderr.as_str())
-                                            .collect::<Vec<_>>()
-                                            .join("\n");
-
-                                        let status = if result.success { "completed" } else { "failed" };
-
                                         // Post result to AGQ
+                                        let status = if result.success { "completed" } else { "failed" };
                                         if let Err(e) = client.post_job_result(
                                             &result.job_id,
-                                            &combined_stdout,
-                                            &combined_stderr,
+                                            &result.combined_stdout(),
+                                            &result.combined_stderr(),
                                             status
                                         ).await {
                                             error!("Failed to post results for job {}: {e}", result.job_id);

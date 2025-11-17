@@ -62,6 +62,26 @@ impl PlanResult {
             success,
         }
     }
+
+    /// Combine stdout from all tasks with newline separator
+    #[must_use]
+    pub fn combined_stdout(&self) -> String {
+        self.task_results
+            .iter()
+            .map(|r| r.stdout.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Combine stderr from all tasks with newline separator
+    #[must_use]
+    pub fn combined_stderr(&self) -> String {
+        self.task_results
+            .iter()
+            .map(|r| r.stderr.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 /// Execute an entire plan sequentially
@@ -454,5 +474,34 @@ mod tests {
 
         let result = execute_plan(&plan).await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_combined_output_methods() {
+        let task_results = vec![
+            TaskResult::new(1, "output1\n".to_string(), "error1\n".to_string(), 0),
+            TaskResult::new(2, "output2\n".to_string(), "error2\n".to_string(), 0),
+            TaskResult::new(3, "output3\n".to_string(), "error3\n".to_string(), 0),
+        ];
+
+        let plan_result =
+            PlanResult::new("job-123".to_string(), "plan-456".to_string(), task_results);
+
+        assert_eq!(
+            plan_result.combined_stdout(),
+            "output1\n\noutput2\n\noutput3\n"
+        );
+        assert_eq!(
+            plan_result.combined_stderr(),
+            "error1\n\nerror2\n\nerror3\n"
+        );
+    }
+
+    #[test]
+    fn test_combined_output_empty() {
+        let plan_result = PlanResult::new("job-123".to_string(), "plan-456".to_string(), vec![]);
+
+        assert_eq!(plan_result.combined_stdout(), "");
+        assert_eq!(plan_result.combined_stderr(), "");
     }
 }
