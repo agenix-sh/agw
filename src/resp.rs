@@ -454,7 +454,7 @@ mod tests {
     #[test]
     fn test_tool_list_formatting() {
         // Test that tools are formatted correctly for storage
-        let tools = vec![
+        let tools = [
             "sort".to_string(),
             "grep".to_string(),
             "agx-ocr".to_string(),

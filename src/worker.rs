@@ -148,50 +148,10 @@ impl Worker {
                                 plan.plan_id, plan.job_id, plan.tasks.len());
 
                             // Clone client for the spawned task
-                            let mut client = self.client.clone();
+                            let client = self.client.clone();
 
                             // Spawn plan execution on a separate task to allow heartbeats to continue
-                            let plan_handle = tokio::spawn(async move {
-                                match executor::execute_plan(&plan).await {
-                                    Ok(result) => {
-                                        info!(
-                                            "Plan {} (job {}) completed: {} tasks executed, success={}",
-                                            result.plan_id,
-                                            result.job_id,
-                                            result.task_results.len(),
-                                            result.success
-                                        );
-
-                                        // Post result to AGQ (includes partial results if plan failed mid-execution)
-                                        // Note: result.success == false means some tasks failed, but we still have
-                                        // partial output from tasks that completed before the failure
-                                        let status = if result.success { "completed" } else { "failed" };
-                                        if let Err(e) = client.post_job_result(
-                                            &result.job_id,
-                                            &result.combined_stdout(),
-                                            &result.combined_stderr(),
-                                            status
-                                        ).await {
-                                            error!("Failed to post results for job {}: {e}", result.job_id);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        error!("Failed to execute plan {}: {e}", plan.plan_id);
-
-                                        // Post error to AGQ with empty results
-                                        // Note: Execution errors occur before any tasks run, so no partial results exist
-                                        let error_msg = format!("Execution error: {e}");
-                                        if let Err(post_err) = client.post_job_result(
-                                            &plan.job_id,
-                                            "",
-                                            &error_msg,
-                                            "failed"
-                                        ).await {
-                                            error!("Failed to post error for job {}: {post_err}", plan.job_id);
-                                        }
-                                    }
-                                }
-                            });
+                            let plan_handle = tokio::spawn(Self::handle_plan_execution(plan, client));
 
                             current_job = Some(plan_handle);
                         }
@@ -234,44 +194,9 @@ impl Worker {
                                 debug!("Received plan {} (job {}) with {} tasks",
                                     plan.plan_id, plan.job_id, plan.tasks.len());
 
-                                let mut client = self.client.clone();
+                                let client = self.client.clone();
 
-                                let plan_handle = tokio::spawn(async move {
-                                    match crate::executor::execute_plan(&plan).await {
-                                        Ok(result) => {
-                                            info!(
-                                                "Plan {} (job {}) completed: {} tasks executed, success={}",
-                                                result.plan_id,
-                                                result.job_id,
-                                                result.task_results.len(),
-                                                result.success
-                                            );
-
-                                            let status = if result.success { "completed" } else { "failed" };
-                                            if let Err(e) = client.post_job_result(
-                                                &result.job_id,
-                                                &result.combined_stdout(),
-                                                &result.combined_stderr(),
-                                                status
-                                            ).await {
-                                                error!("Failed to post results for job {}: {e}", result.job_id);
-                                            }
-                                        }
-                                        Err(e) => {
-                                            error!("Failed to execute plan {}: {e}", plan.plan_id);
-
-                                            let error_msg = format!("Execution error: {e}");
-                                            if let Err(post_err) = client.post_job_result(
-                                                &plan.job_id,
-                                                "",
-                                                &error_msg,
-                                                "failed"
-                                            ).await {
-                                                error!("Failed to post error for job {}: {post_err}", plan.job_id);
-                                            }
-                                        }
-                                    }
-                                });
+                                let plan_handle = tokio::spawn(Self::handle_plan_execution(plan, client));
 
                                 current_job = Some(plan_handle);
                             }
@@ -347,6 +272,54 @@ impl Worker {
     #[allow(dead_code)]
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// Handle plan execution (extracted to avoid duplication between Unix/non-Unix code paths)
+    async fn handle_plan_execution(plan: Plan, mut client: RespClient) {
+        match executor::execute_plan(&plan).await {
+            Ok(result) => {
+                info!(
+                    "Plan {} (job {}) completed: {} tasks executed, success={}",
+                    result.plan_id,
+                    result.job_id,
+                    result.task_results.len(),
+                    result.success
+                );
+
+                // Post result to AGQ (includes partial results if plan failed mid-execution)
+                // Note: result.success == false means some tasks failed, but we still have
+                // partial output from tasks that completed before the failure
+                let status = if result.success {
+                    "completed"
+                } else {
+                    "failed"
+                };
+                if let Err(e) = client
+                    .post_job_result(
+                        &result.job_id,
+                        &result.combined_stdout(),
+                        &result.combined_stderr(),
+                        status,
+                    )
+                    .await
+                {
+                    error!("Failed to post results for job {}: {e}", result.job_id);
+                }
+            }
+            Err(e) => {
+                error!("Failed to execute plan {}: {e}", plan.plan_id);
+
+                // Post error to AGQ with empty results
+                // Note: Execution errors occur before any tasks run, so no partial results exist
+                let error_msg = format!("Execution error: {e}");
+                if let Err(post_err) = client
+                    .post_job_result(&plan.job_id, "", &error_msg, "failed")
+                    .await
+                {
+                    error!("Failed to post error for job {}: {post_err}", plan.job_id);
+                }
+            }
+        }
     }
 }
 

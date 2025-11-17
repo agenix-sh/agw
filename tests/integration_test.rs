@@ -155,7 +155,7 @@ fn test_result_data_sanitization() {
     }
 
     // Test that combining multiple task outputs works correctly
-    let task_outputs = vec!["task1\n", "task2\n", "task3\n"];
+    let task_outputs = ["task1\n", "task2\n", "task3\n"];
     let combined = task_outputs.join("\n");
     assert_eq!(combined, "task1\n\ntask2\n\ntask3\n");
 }
@@ -242,7 +242,7 @@ fn test_key_collision_prevention() {
 #[test]
 fn test_tool_registration_format() {
     // Test tool list serialization format
-    let tools = vec![
+    let tools = [
         "sort".to_string(),
         "grep".to_string(),
         "agx-ocr".to_string(),
@@ -347,11 +347,10 @@ fn test_shutdown_prevents_new_jobs() {
 #[test]
 fn test_graceful_shutdown_with_job() {
     // Simulates graceful shutdown behavior
-    let shutdown_requested;
     let mut job_running = true;
 
     // Shutdown signal received
-    shutdown_requested = true;
+    let shutdown_requested = true;
 
     // Job still running - should not exit
     assert!(shutdown_requested && job_running);
