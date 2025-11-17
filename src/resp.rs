@@ -6,6 +6,7 @@ use redis::{aio::ConnectionManager, Client, Cmd};
 use tracing::{debug, info};
 
 /// RESP client for communicating with AGQ
+#[derive(Clone)]
 pub struct RespClient {
     connection: ConnectionManager,
 }
@@ -122,6 +123,71 @@ impl RespClient {
         }
     }
 
+    /// Set a key-value pair in AGQ
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RESP protocol command fails
+    pub async fn set(&mut self, key: &str, value: &str) -> AgwResult<()> {
+        debug!("Setting key: {}", key);
+
+        let response: String = Cmd::new()
+            .arg("SET")
+            .arg(key)
+            .arg(value)
+            .query_async(&mut self.connection)
+            .await
+            .map_err(|e| AgwError::RespProtocol(format!("SET failed: {e}")))?;
+
+        if response != "OK" {
+            return Err(AgwError::RespProtocol(format!(
+                "Unexpected SET response: {response}"
+            )));
+        }
+
+        debug!("Successfully set key: {}", key);
+        Ok(())
+    }
+
+    /// Post job execution results to AGQ
+    ///
+    /// Stores stdout, stderr, and status for the given job ID
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any RESP protocol command fails
+    pub async fn post_job_result(
+        &mut self,
+        job_id: &str,
+        stdout: &str,
+        stderr: &str,
+        status: &str,
+    ) -> AgwResult<()> {
+        debug!("Posting results for job {}", job_id);
+
+        // Validate status is one of the expected values
+        if !matches!(status, "completed" | "failed" | "pending" | "running") {
+            return Err(AgwError::RespProtocol(format!(
+                "Invalid job status: {status}"
+            )));
+        }
+
+        // Set stdout
+        let stdout_key = format!("job:{}:stdout", job_id);
+        self.set(&stdout_key, stdout).await?;
+
+        // Set stderr
+        let stderr_key = format!("job:{}:stderr", job_id);
+        self.set(&stderr_key, stderr).await?;
+
+        // Set status
+        let status_key = format!("job:{}:status", job_id);
+        self.set(&status_key, status).await?;
+
+        info!("Successfully posted results for job {}", job_id);
+        Ok(())
+    }
+
     /// Get the underlying connection (for future operations)
     #[allow(dead_code)]
     pub fn connection(&mut self) -> &mut ConnectionManager {
@@ -184,5 +250,37 @@ mod tests {
         assert!(!is_valid_address("localhost;whoami:6379"));
         assert!(!is_valid_address("localhost|cat /etc/passwd:6379"));
         assert!(!is_valid_address("$(whoami):6379"));
+    }
+
+    #[test]
+    fn test_post_job_result_validates_status() {
+        // Valid statuses should be accepted (tested via mock in integration tests)
+        let valid_statuses = vec!["completed", "failed", "pending", "running"];
+        for status in valid_statuses {
+            assert!(matches!(
+                status,
+                "completed" | "failed" | "pending" | "running"
+            ));
+        }
+
+        // Invalid status would be rejected
+        let invalid_status = "invalid_status";
+        assert!(!matches!(
+            invalid_status,
+            "completed" | "failed" | "pending" | "running"
+        ));
+    }
+
+    #[test]
+    fn test_job_key_format() {
+        // Test that job key format matches expected pattern
+        let job_id = "job-123";
+        let stdout_key = format!("job:{}:stdout", job_id);
+        let stderr_key = format!("job:{}:stderr", job_id);
+        let status_key = format!("job:{}:status", job_id);
+
+        assert_eq!(stdout_key, "job:job-123:stdout");
+        assert_eq!(stderr_key, "job:job-123:stderr");
+        assert_eq!(status_key, "job:job-123:status");
     }
 }

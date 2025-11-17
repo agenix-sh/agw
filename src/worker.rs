@@ -102,6 +102,9 @@ impl Worker {
                             debug!("Received plan {} (job {}) with {} tasks",
                                 plan.plan_id, plan.job_id, plan.tasks.len());
 
+                            // Clone client for the spawned task
+                            let mut client = self.client.clone();
+
                             // Spawn plan execution on a separate task to allow heartbeats to continue
                             let plan_handle = tokio::spawn(async move {
                                 match executor::execute_plan(&plan).await {
@@ -113,12 +116,42 @@ impl Worker {
                                             result.task_results.len(),
                                             result.success
                                         );
-                                        // TODO: Post result to AGQ in AGW-007
-                                        debug!("Plan execution result: {:?}", result);
+
+                                        // Combine stdout and stderr from all tasks
+                                        let combined_stdout = result.task_results.iter()
+                                            .map(|r| r.stdout.as_str())
+                                            .collect::<Vec<_>>()
+                                            .join("\n");
+                                        let combined_stderr = result.task_results.iter()
+                                            .map(|r| r.stderr.as_str())
+                                            .collect::<Vec<_>>()
+                                            .join("\n");
+
+                                        let status = if result.success { "completed" } else { "failed" };
+
+                                        // Post result to AGQ
+                                        if let Err(e) = client.post_job_result(
+                                            &result.job_id,
+                                            &combined_stdout,
+                                            &combined_stderr,
+                                            status
+                                        ).await {
+                                            error!("Failed to post results for job {}: {e}", result.job_id);
+                                        }
                                     }
                                     Err(e) => {
                                         error!("Failed to execute plan {}: {e}", plan.plan_id);
-                                        // TODO: Post error to AGQ in AGW-007
+
+                                        // Post error to AGQ
+                                        let error_msg = format!("Execution error: {e}");
+                                        if let Err(post_err) = client.post_job_result(
+                                            &plan.job_id,
+                                            "",
+                                            &error_msg,
+                                            "failed"
+                                        ).await {
+                                            error!("Failed to post error for job {}: {post_err}", plan.job_id);
+                                        }
                                     }
                                 }
                             });

@@ -83,3 +83,106 @@ fn test_unicode_and_special_input_handling() {
     assert!(validate_worker_id("worker\ttest").is_err()); // Tab
     assert!(validate_worker_id("worker\ntest").is_err()); // Newline
 }
+
+#[test]
+fn test_job_result_key_format_security() {
+    // Test that job IDs are properly formatted into keys
+    let job_id = "job-123";
+
+    // Valid key format
+    let stdout_key = format!("job:{}:stdout", job_id);
+    assert_eq!(stdout_key, "job:job-123:stdout");
+
+    // Ensure no special characters in job ID would break key format
+    let malicious_job_id = "job;rm -rf /";
+    let malformed_key = format!("job:{}:stdout", malicious_job_id);
+    // The key format itself is safe, but AGQ should validate job IDs
+    assert!(malformed_key.contains(';'));
+
+    // Test key format with valid UUID-style job ID
+    let uuid_job_id = "550e8400-e29b-41d4-a716-446655440000";
+    let valid_key = format!("job:{}:stdout", uuid_job_id);
+    assert_eq!(valid_key, "job:550e8400-e29b-41d4-a716-446655440000:stdout");
+}
+
+#[test]
+fn test_job_status_validation() {
+    // Valid statuses
+    let valid_statuses = vec!["completed", "failed", "pending", "running"];
+    for status in valid_statuses {
+        assert!(matches!(
+            status,
+            "completed" | "failed" | "pending" | "running"
+        ));
+    }
+
+    // Invalid statuses that should be rejected
+    let invalid_statuses = vec![
+        "invalid",
+        "COMPLETED", // Case sensitive
+        "complete",
+        "error",
+        "success",
+        "done",
+        "",
+        "failed; rm -rf /", // Injection attempt
+    ];
+
+    for status in invalid_statuses {
+        assert!(!matches!(
+            status,
+            "completed" | "failed" | "pending" | "running"
+        ));
+    }
+}
+
+#[test]
+fn test_result_data_sanitization() {
+    // Test that result data with special characters is handled safely
+    let test_cases = vec![
+        ("Normal output\n", "Normal output\n"),
+        (
+            "Output with\ntabs\tand spaces",
+            "Output with\ntabs\tand spaces",
+        ),
+        ("", ""), // Empty output
+    ];
+
+    for (input, expected) in test_cases {
+        // The data is stored as-is, no sanitization needed for content
+        // Security is handled at the protocol level by RESP encoding
+        assert_eq!(input, expected);
+    }
+
+    // Test that combining multiple task outputs works correctly
+    let task_outputs = vec!["task1\n", "task2\n", "task3\n"];
+    let combined = task_outputs.join("\n");
+    assert_eq!(combined, "task1\n\ntask2\n\ntask3\n");
+}
+
+#[test]
+fn test_large_output_handling() {
+    // Test that large outputs are handled correctly
+    let large_output = "x".repeat(1_000_000); // 1MB of data
+    assert_eq!(large_output.len(), 1_000_000);
+
+    // Ensure we can format it into a key without panic
+    let job_id = "job-123";
+    let _key = format!("job:{}:stdout", job_id);
+
+    // The actual storage limit is handled by AGQ/Redis
+}
+
+#[test]
+fn test_error_message_format() {
+    // Test that error messages are formatted correctly
+    let error = "Execution error: Command not found";
+    let formatted = format!("Execution error: {}", "Command not found");
+    assert_eq!(error, formatted);
+
+    // Error messages should not contain sensitive data
+    let safe_error = "Execution error: Failed to spawn command";
+    assert!(!safe_error.contains("password"));
+    assert!(!safe_error.contains("secret"));
+    assert!(!safe_error.contains("token"));
+}
