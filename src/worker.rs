@@ -102,6 +102,9 @@ impl Worker {
                             debug!("Received plan {} (job {}) with {} tasks",
                                 plan.plan_id, plan.job_id, plan.tasks.len());
 
+                            // Clone client for the spawned task
+                            let mut client = self.client.clone();
+
                             // Spawn plan execution on a separate task to allow heartbeats to continue
                             let plan_handle = tokio::spawn(async move {
                                 match executor::execute_plan(&plan).await {
@@ -113,12 +116,34 @@ impl Worker {
                                             result.task_results.len(),
                                             result.success
                                         );
-                                        // TODO: Post result to AGQ in AGW-007
-                                        debug!("Plan execution result: {:?}", result);
+
+                                        // Post result to AGQ (includes partial results if plan failed mid-execution)
+                                        // Note: result.success == false means some tasks failed, but we still have
+                                        // partial output from tasks that completed before the failure
+                                        let status = if result.success { "completed" } else { "failed" };
+                                        if let Err(e) = client.post_job_result(
+                                            &result.job_id,
+                                            &result.combined_stdout(),
+                                            &result.combined_stderr(),
+                                            status
+                                        ).await {
+                                            error!("Failed to post results for job {}: {e}", result.job_id);
+                                        }
                                     }
                                     Err(e) => {
                                         error!("Failed to execute plan {}: {e}", plan.plan_id);
-                                        // TODO: Post error to AGQ in AGW-007
+
+                                        // Post error to AGQ with empty results
+                                        // Note: Execution errors occur before any tasks run, so no partial results exist
+                                        let error_msg = format!("Execution error: {e}");
+                                        if let Err(post_err) = client.post_job_result(
+                                            &plan.job_id,
+                                            "",
+                                            &error_msg,
+                                            "failed"
+                                        ).await {
+                                            error!("Failed to post error for job {}: {post_err}", plan.job_id);
+                                        }
                                     }
                                 }
                             });
@@ -143,7 +168,8 @@ impl Worker {
     ///
     /// # Errors
     ///
-    /// Returns an error if BRPOP fails, plan JSON is invalid, or validation fails
+    /// Returns an error if BRPOP fails, plan JSON is invalid, validation fails,
+    /// or job ID is invalid
     async fn fetch_plan(&mut self) -> AgwResult<Option<Plan>> {
         const QUEUE_NAME: &str = "queue:ready";
         const BRPOP_TIMEOUT: u64 = 5; // 5 second timeout to allow heartbeats
@@ -153,6 +179,18 @@ impl Worker {
                 // Parse JSON - sanitize error to avoid information disclosure
                 let plan = Plan::from_json(&json)
                     .map_err(|_| AgwError::Worker("Invalid plan JSON format".to_string()))?;
+
+                // Validate job ID early to prevent processing plans with invalid IDs
+                // This catches issues before plan execution rather than after
+                if plan.job_id.is_empty() {
+                    return Err(AgwError::Worker("Job ID cannot be empty".to_string()));
+                }
+                if plan.job_id.contains(':') {
+                    return Err(AgwError::Worker(format!(
+                        "Job ID contains invalid character (colon): {}",
+                        plan.job_id
+                    )));
+                }
 
                 // Validate plan structure and all tasks for security
                 plan.validate()?;
