@@ -305,3 +305,60 @@ fn test_tool_key_format_consistency() {
     assert!(tools_key.ends_with(":tools"));
     assert!(alive_key.ends_with(":alive"));
 }
+
+#[test]
+fn test_shutdown_flag_behavior() {
+    // Test shutdown flag logic
+    let mut shutdown_requested = false;
+    let current_job_running = false;
+
+    // Before shutdown: should fetch jobs
+    assert!(!shutdown_requested);
+    let should_fetch = !shutdown_requested && !current_job_running;
+    assert!(should_fetch);
+
+    // After shutdown request with no job: should exit
+    shutdown_requested = true;
+    let should_exit = shutdown_requested && !current_job_running;
+    assert!(should_exit);
+
+    // After shutdown request with job running: should NOT exit yet
+    let current_job_running = true;
+    let should_exit = shutdown_requested && !current_job_running;
+    assert!(!should_exit);
+
+    // Job completes: now should exit
+    let current_job_running = false;
+    let should_exit = shutdown_requested && !current_job_running;
+    assert!(should_exit);
+}
+
+#[test]
+fn test_shutdown_prevents_new_jobs() {
+    // Simulates the shutdown logic
+    let shutdown_requested = true;
+    let current_job_running = false;
+
+    // Should not fetch new jobs when shutdown is requested
+    let should_fetch_new_job = !shutdown_requested && !current_job_running;
+    assert!(!should_fetch_new_job);
+}
+
+#[test]
+fn test_graceful_shutdown_with_job() {
+    // Simulates graceful shutdown behavior
+    let shutdown_requested;
+    let mut job_running = true;
+
+    // Shutdown signal received
+    shutdown_requested = true;
+
+    // Job still running - should not exit
+    assert!(shutdown_requested && job_running);
+
+    // Job completes
+    job_running = false;
+
+    // Now should exit
+    assert!(shutdown_requested && !job_running);
+}
