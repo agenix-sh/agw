@@ -63,24 +63,30 @@ impl PlanResult {
         }
     }
 
-    /// Combine stdout from all tasks with newline separator
+    /// Combine stdout from all tasks
+    ///
+    /// Task outputs already contain trailing newlines from command execution,
+    /// so this simply concatenates them without additional separators to avoid
+    /// creating double newlines between tasks.
     #[must_use]
     pub fn combined_stdout(&self) -> String {
         self.task_results
             .iter()
             .map(|r| r.stdout.as_str())
-            .collect::<Vec<_>>()
-            .join("\n")
+            .collect::<String>()
     }
 
-    /// Combine stderr from all tasks with newline separator
+    /// Combine stderr from all tasks
+    ///
+    /// Task outputs already contain trailing newlines from command execution,
+    /// so this simply concatenates them without additional separators to avoid
+    /// creating double newlines between tasks.
     #[must_use]
     pub fn combined_stderr(&self) -> String {
         self.task_results
             .iter()
             .map(|r| r.stderr.as_str())
-            .collect::<Vec<_>>()
-            .join("\n")
+            .collect::<String>()
     }
 }
 
@@ -487,14 +493,9 @@ mod tests {
         let plan_result =
             PlanResult::new("job-123".to_string(), "plan-456".to_string(), task_results);
 
-        assert_eq!(
-            plan_result.combined_stdout(),
-            "output1\n\noutput2\n\noutput3\n"
-        );
-        assert_eq!(
-            plan_result.combined_stderr(),
-            "error1\n\nerror2\n\nerror3\n"
-        );
+        // Outputs already have newlines, so concatenation doesn't add extra separators
+        assert_eq!(plan_result.combined_stdout(), "output1\noutput2\noutput3\n");
+        assert_eq!(plan_result.combined_stderr(), "error1\nerror2\nerror3\n");
     }
 
     #[test]

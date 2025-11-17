@@ -154,14 +154,58 @@ impl RespClient {
         Ok(())
     }
 
-    /// Post job execution results to AGQ
+    /// Post job execution results to AGQ with retry logic
     ///
-    /// Stores stdout, stderr, and status for the given job ID
+    /// Stores stdout, stderr, and status for the given job ID.
+    /// Retries up to 3 times with exponential backoff on failure to ensure
+    /// results are not lost due to transient network issues.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if all retry attempts fail or if job_id/status are invalid
+    pub async fn post_job_result(
+        &mut self,
+        job_id: &str,
+        stdout: &str,
+        stderr: &str,
+        status: &str,
+    ) -> AgwResult<()> {
+        const MAX_RETRIES: u32 = 3;
+        const INITIAL_BACKOFF_MS: u64 = 100;
+
+        let mut last_error = None;
+
+        for attempt in 0..MAX_RETRIES {
+            match self
+                .post_job_result_once(job_id, stdout, stderr, status)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    last_error = Some(e);
+                    if attempt < MAX_RETRIES - 1 {
+                        let backoff_ms = INITIAL_BACKOFF_MS * 2_u64.pow(attempt);
+                        debug!(
+                            "Result posting failed (attempt {}/{}), retrying after {}ms",
+                            attempt + 1,
+                            MAX_RETRIES,
+                            backoff_ms
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
+                    }
+                }
+            }
+        }
+
+        Err(last_error.unwrap())
+    }
+
+    /// Internal method to post job result once without retries
     ///
     /// # Errors
     ///
     /// Returns an error if any RESP protocol command fails or if job_id/status are invalid
-    pub async fn post_job_result(
+    async fn post_job_result_once(
         &mut self,
         job_id: &str,
         stdout: &str,
