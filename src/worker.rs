@@ -4,7 +4,7 @@ use crate::executor;
 use crate::plan::Plan;
 use crate::resp::RespClient;
 use tokio::task::JoinHandle;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 use uuid::Uuid;
 
 /// AGW Worker
@@ -66,6 +66,15 @@ impl Worker {
     pub async fn run(mut self) -> AgwResult<()> {
         info!("Worker {} starting main loop", self.id);
 
+        // Setup signal handlers for graceful shutdown
+        #[cfg(unix)]
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .map_err(|e| AgwError::Worker(format!("Failed to setup SIGTERM handler: {e}")))?;
+
+        #[cfg(unix)]
+        let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+            .map_err(|e| AgwError::Worker(format!("Failed to setup SIGINT handler: {e}")))?;
+
         // Main loop: fetch jobs and send heartbeats
         let mut heartbeat_interval = tokio::time::interval(self.config.heartbeat_duration());
 
@@ -76,87 +85,81 @@ impl Worker {
         // Track currently executing job (if any)
         let mut current_job: Option<JoinHandle<()>> = None;
 
+        // Shutdown flag (Unix only - Windows doesn't have signal handlers yet)
+        #[cfg(unix)]
+        let mut shutdown_requested = false;
+
         loop {
+            // Check if shutdown was requested and no job is running (Unix only)
+            #[cfg(unix)]
+            if shutdown_requested && current_job.is_none() {
+                info!("Shutdown complete - no jobs running");
+                break;
+            }
+
             // Check if current job is complete (non-blocking)
+            // If finished, await the handle to detect panics and ensure cleanup
             if let Some(handle) = current_job.as_mut() {
                 if handle.is_finished() {
                     debug!("Job execution task completed");
+                    // Await the handle to catch any panics and ensure proper cleanup
+                    // This prevents silently ignoring panicked tasks during normal operation
+                    if let Err(e) = handle.await {
+                        error!("Job execution task panicked: {e}");
+                    }
                     current_job = None;
                 }
             }
 
             // Use tokio::select with biased mode to prioritize heartbeats
             // This prevents DoS when jobs are continuously available
-            tokio::select! {
-                biased;
+            #[cfg(unix)]
+            {
+                tokio::select! {
+                    biased;
 
-                // Heartbeat tick - checked first to ensure heartbeats are never missed
-                _ = heartbeat_interval.tick() => {
-                    match self.send_heartbeat().await {
-                        Ok(()) => {
-                            debug!("Heartbeat sent successfully for worker {}", self.id);
-                        }
-                        Err(e) => {
-                            error!("Failed to send heartbeat: {e}");
-                            warn!("Worker {} may need to reconnect", self.id);
-                            return Err(e);
+                    // Signal handlers - highest priority
+                    _ = sigterm.recv() => {
+                        info!("Received SIGTERM, initiating graceful shutdown");
+                        shutdown_requested = true;
+                        if current_job.is_some() {
+                            info!("Waiting for current job to complete before shutdown");
                         }
                     }
-                }
 
-                // Plan fetch (with 5 second timeout to allow heartbeats)
-                // Only fetch if not currently executing a plan
-                plan_result = self.fetch_plan(), if current_job.is_none() => {
+                    _ = sigint.recv() => {
+                        info!("Received SIGINT (Ctrl+C), initiating graceful shutdown");
+                        shutdown_requested = true;
+                        if current_job.is_some() {
+                            info!("Waiting for current job to complete before shutdown");
+                        }
+                    }
+
+                    // Heartbeat tick
+                    _ = heartbeat_interval.tick() => {
+                        match self.send_heartbeat().await {
+                            Ok(()) => {
+                                debug!("Heartbeat sent successfully for worker {}", self.id);
+                            }
+                            Err(e) => {
+                                error!("Failed to send heartbeat: {e}");
+                                return Err(e);
+                            }
+                        }
+                    }
+
+                    // Plan fetch
+                    plan_result = self.fetch_plan(), if current_job.is_none() && !shutdown_requested => {
                     match plan_result {
                         Ok(Some(plan)) => {
                             debug!("Received plan {} (job {}) with {} tasks",
                                 plan.plan_id, plan.job_id, plan.tasks.len());
 
                             // Clone client for the spawned task
-                            let mut client = self.client.clone();
+                            let client = self.client.clone();
 
                             // Spawn plan execution on a separate task to allow heartbeats to continue
-                            let plan_handle = tokio::spawn(async move {
-                                match executor::execute_plan(&plan).await {
-                                    Ok(result) => {
-                                        info!(
-                                            "Plan {} (job {}) completed: {} tasks executed, success={}",
-                                            result.plan_id,
-                                            result.job_id,
-                                            result.task_results.len(),
-                                            result.success
-                                        );
-
-                                        // Post result to AGQ (includes partial results if plan failed mid-execution)
-                                        // Note: result.success == false means some tasks failed, but we still have
-                                        // partial output from tasks that completed before the failure
-                                        let status = if result.success { "completed" } else { "failed" };
-                                        if let Err(e) = client.post_job_result(
-                                            &result.job_id,
-                                            &result.combined_stdout(),
-                                            &result.combined_stderr(),
-                                            status
-                                        ).await {
-                                            error!("Failed to post results for job {}: {e}", result.job_id);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        error!("Failed to execute plan {}: {e}", plan.plan_id);
-
-                                        // Post error to AGQ with empty results
-                                        // Note: Execution errors occur before any tasks run, so no partial results exist
-                                        let error_msg = format!("Execution error: {e}");
-                                        if let Err(post_err) = client.post_job_result(
-                                            &plan.job_id,
-                                            "",
-                                            &error_msg,
-                                            "failed"
-                                        ).await {
-                                            error!("Failed to post error for job {}: {post_err}", plan.job_id);
-                                        }
-                                    }
-                                }
-                            });
+                            let plan_handle = tokio::spawn(Self::handle_plan_execution(plan, client));
 
                             current_job = Some(plan_handle);
                         }
@@ -170,8 +173,86 @@ impl Worker {
                         }
                     }
                 }
+                }
+            }
+
+            // Non-Unix platforms (Windows) - no signal handling available yet
+            #[cfg(not(unix))]
+            {
+                tokio::select! {
+                    biased;
+
+                    // Heartbeat tick
+                    _ = heartbeat_interval.tick() => {
+                        match self.send_heartbeat().await {
+                            Ok(()) => {
+                                debug!("Heartbeat sent successfully for worker {}", self.id);
+                            }
+                            Err(e) => {
+                                error!("Failed to send heartbeat: {e}");
+                                return Err(e);
+                            }
+                        }
+                    }
+
+                    // Plan fetch (no shutdown handling on Windows yet)
+                    plan_result = self.fetch_plan(), if current_job.is_none() => {
+                        match plan_result {
+                            Ok(Some(plan)) => {
+                                debug!("Received plan {} (job {}) with {} tasks",
+                                    plan.plan_id, plan.job_id, plan.tasks.len());
+
+                                let client = self.client.clone();
+
+                                let plan_handle = tokio::spawn(Self::handle_plan_execution(plan, client));
+
+                                current_job = Some(plan_handle);
+                            }
+                            Ok(None) => {
+                                debug!("Plan fetch timeout, continuing...");
+                            }
+                            Err(e) => {
+                                error!("Failed to fetch plan: {e}");
+                                return Err(e);
+                            }
+                        }
+                    }
+                }
             }
         }
+
+        // Graceful shutdown: wait for current job to complete if still running
+        if let Some(handle) = current_job {
+            if let Some(timeout) = self.config.shutdown_timeout_duration() {
+                info!(
+                    "Waiting up to {:?} for current job to complete before shutdown",
+                    timeout
+                );
+                match tokio::time::timeout(timeout, handle).await {
+                    Ok(Ok(())) => {
+                        info!("Job completed successfully before shutdown");
+                    }
+                    Ok(Err(e)) => {
+                        error!("Job execution task panicked during shutdown: {e}");
+                    }
+                    Err(_) => {
+                        error!(
+                            "Job did not complete within {:?}, forcing shutdown. \
+                             Job results may be incomplete.",
+                            timeout
+                        );
+                    }
+                }
+            } else {
+                info!("Waiting for current job to complete before shutdown (no timeout)");
+                if let Err(e) = handle.await {
+                    error!("Job execution task panicked during shutdown: {e}");
+                }
+            }
+        }
+
+        info!("Worker {} shutting down gracefully", self.id);
+        Ok(())
     }
 
     /// Fetch a plan from the queue
@@ -221,6 +302,54 @@ impl Worker {
     #[allow(dead_code)]
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// Handle plan execution (extracted to avoid duplication between Unix/non-Unix code paths)
+    async fn handle_plan_execution(plan: Plan, mut client: RespClient) {
+        match executor::execute_plan(&plan).await {
+            Ok(result) => {
+                info!(
+                    "Plan {} (job {}) completed: {} tasks executed, success={}",
+                    result.plan_id,
+                    result.job_id,
+                    result.task_results.len(),
+                    result.success
+                );
+
+                // Post result to AGQ (includes partial results if plan failed mid-execution)
+                // Note: result.success == false means some tasks failed, but we still have
+                // partial output from tasks that completed before the failure
+                let status = if result.success {
+                    "completed"
+                } else {
+                    "failed"
+                };
+                if let Err(e) = client
+                    .post_job_result(
+                        &result.job_id,
+                        &result.combined_stdout(),
+                        &result.combined_stderr(),
+                        status,
+                    )
+                    .await
+                {
+                    error!("Failed to post results for job {}: {e}", result.job_id);
+                }
+            }
+            Err(e) => {
+                error!("Failed to execute plan {}: {e}", plan.plan_id);
+
+                // Post error to AGQ with empty results
+                // Note: Execution errors occur before any tasks run, so no partial results exist
+                let error_msg = format!("Execution error: {e}");
+                if let Err(post_err) = client
+                    .post_job_result(&plan.job_id, "", &error_msg, "failed")
+                    .await
+                {
+                    error!("Failed to post error for job {}: {post_err}", plan.job_id);
+                }
+            }
+        }
     }
 }
 

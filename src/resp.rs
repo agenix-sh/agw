@@ -7,7 +7,7 @@ use tracing::{debug, info};
 
 /// RESP client for communicating with AGQ
 ///
-/// Clone is safe and efficient because ConnectionManager uses Arc internally,
+/// Clone is safe and efficient because `ConnectionManager` uses Arc internally,
 /// making clones lightweight. This allows workers to spawn plan execution tasks
 /// with their own client instance for result posting, while the main worker
 /// continues to send heartbeats on the original client.
@@ -98,23 +98,23 @@ impl RespClient {
     ///
     /// Returns an error if the RESP protocol command fails or if tool names are invalid
     pub async fn register_tools(&mut self, worker_id: &str, tools: &[String]) -> AgwResult<()> {
+        const MAX_TOOLS: usize = 100;
+        const MAX_TOOL_NAME_LENGTH: usize = 64;
+
         if tools.is_empty() {
             debug!("No tools to register for worker {}", worker_id);
             return Ok(());
         }
 
         // Validate number of tools
-        const MAX_TOOLS: usize = 100;
         if tools.len() > MAX_TOOLS {
             return Err(AgwError::RespProtocol(format!(
-                "Too many tools: {} (maximum {})",
-                tools.len(),
-                MAX_TOOLS
+                "Too many tools: {} (maximum {MAX_TOOLS})",
+                tools.len()
             )));
         }
 
         // Validate each tool name
-        const MAX_TOOL_NAME_LENGTH: usize = 64;
         for tool in tools {
             // Check length
             if tool.is_empty() {
@@ -139,25 +139,22 @@ impl RespClient {
                 .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
             {
                 return Err(AgwError::RespProtocol(format!(
-                    "Invalid tool name '{}': only alphanumeric, hyphens, and underscores allowed",
-                    tool
+                    "Invalid tool name '{tool}': only alphanumeric, hyphens, and underscores allowed"
                 )));
             }
         }
 
-        let key = format!("worker:{}:tools", worker_id);
+        let key = format!("worker:{worker_id}:tools");
         let value = tools.join(",");
 
         info!(
-            "Registering {} tools for worker {}: {}",
-            tools.len(),
-            worker_id,
-            value
+            "Registering {} tools for worker {worker_id}: {value}",
+            tools.len()
         );
 
         self.set(&key, &value).await?;
 
-        info!("Successfully registered tools for worker {}", worker_id);
+        info!("Successfully registered tools for worker {worker_id}");
         Ok(())
     }
 
@@ -234,7 +231,13 @@ impl RespClient {
     ///
     /// # Errors
     ///
-    /// Returns an error if all retry attempts fail or if job_id/status are invalid
+    /// Returns an error if all retry attempts fail or if `job_id`/`status` are invalid
+    ///
+    /// # Panics
+    ///
+    /// Panics if all retry attempts fail but last_error is None. This should never
+    /// happen in practice since MAX_RETRIES is at least 1, guaranteeing last_error
+    /// will be populated.
     pub async fn post_job_result(
         &mut self,
         job_id: &str,
@@ -276,7 +279,7 @@ impl RespClient {
     ///
     /// # Errors
     ///
-    /// Returns an error if any RESP protocol command fails or if job_id/status are invalid
+    /// Returns an error if any RESP protocol command fails or if `job_id`/`status` are invalid
     async fn post_job_result_once(
         &mut self,
         job_id: &str,
@@ -451,7 +454,7 @@ mod tests {
     #[test]
     fn test_tool_list_formatting() {
         // Test that tools are formatted correctly for storage
-        let tools = vec![
+        let tools = [
             "sort".to_string(),
             "grep".to_string(),
             "agx-ocr".to_string(),

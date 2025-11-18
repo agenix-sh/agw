@@ -34,6 +34,11 @@ pub struct Config {
     /// If not provided, tools will be auto-discovered from PATH
     #[arg(long, env = "WORKER_TOOLS", value_delimiter = ',')]
     pub tools: Option<Vec<String>>,
+
+    /// Shutdown timeout in seconds (maximum wait for job completion during shutdown)
+    /// If not specified, waits indefinitely for job completion
+    #[arg(long, env = "SHUTDOWN_TIMEOUT")]
+    pub shutdown_timeout: Option<u64>,
 }
 
 impl Config {
@@ -79,6 +84,12 @@ impl Config {
     #[allow(dead_code)]
     pub fn connection_timeout_duration(&self) -> Duration {
         Duration::from_secs(self.connection_timeout)
+    }
+
+    /// Get shutdown timeout as Duration (if configured)
+    #[must_use]
+    pub fn shutdown_timeout_duration(&self) -> Option<Duration> {
+        self.shutdown_timeout.map(Duration::from_secs)
     }
 }
 
