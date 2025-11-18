@@ -38,7 +38,8 @@ const DANGEROUS_UNICODE: &[char] = &[
 
 /// Execution plan containing multiple tasks
 ///
-/// Plans are fetched from AGQ via BRPOP on the `queue:ready` list.
+/// Plans are fetched from AGQ via BRPOPLPUSH on the `queue:ready` list.
+/// Jobs are atomically moved to `queue:processing` to prevent job loss on worker crashes.
 /// Each plan contains an ordered list of tasks to execute sequentially.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[allow(clippy::struct_field_names)] // Field names match schema specification
