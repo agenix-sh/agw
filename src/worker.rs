@@ -151,7 +151,7 @@ impl Worker {
                     // Plan fetch
                     plan_result = self.fetch_plan(), if current_job.is_none() && !shutdown_requested => {
                     match plan_result {
-                        Ok(Some(plan)) => {
+                        Ok(Some((plan, job_json))) => {
                             debug!("Received plan {} (job {}) with {} tasks",
                                 plan.plan_id, plan.job_id, plan.tasks.len());
 
@@ -159,7 +159,7 @@ impl Worker {
                             let client = self.client.clone();
 
                             // Spawn plan execution on a separate task to allow heartbeats to continue
-                            let plan_handle = tokio::spawn(Self::handle_plan_execution(plan, client));
+                            let plan_handle = tokio::spawn(Self::handle_plan_execution(plan, job_json, client));
 
                             current_job = Some(plan_handle);
                         }
@@ -198,13 +198,13 @@ impl Worker {
                     // Plan fetch (no shutdown handling on Windows yet)
                     plan_result = self.fetch_plan(), if current_job.is_none() => {
                         match plan_result {
-                            Ok(Some(plan)) => {
+                            Ok(Some((plan, job_json))) => {
                                 debug!("Received plan {} (job {}) with {} tasks",
                                     plan.plan_id, plan.job_id, plan.tasks.len());
 
                                 let client = self.client.clone();
 
-                                let plan_handle = tokio::spawn(Self::handle_plan_execution(plan, client));
+                                let plan_handle = tokio::spawn(Self::handle_plan_execution(plan, job_json, client));
 
                                 current_job = Some(plan_handle);
                             }
@@ -255,18 +255,30 @@ impl Worker {
         Ok(())
     }
 
-    /// Fetch a plan from the queue
+    /// Fetch a plan from the queue using reliable BRPOPLPUSH
+    ///
+    /// This atomically moves the job from `queue:ready` to `queue:processing`,
+    /// ensuring the job is not lost if the worker crashes during execution.
+    /// Returns both the parsed Plan and the raw JSON (needed for cleanup after
+    /// successful execution).
     ///
     /// # Errors
     ///
-    /// Returns an error if BRPOP fails, plan JSON is invalid, validation fails,
+    /// Returns an error if BRPOPLPUSH fails, plan JSON is invalid, validation fails,
     /// or job ID is invalid
-    async fn fetch_plan(&mut self) -> AgwResult<Option<Plan>> {
-        const QUEUE_NAME: &str = "queue:ready";
-        const BRPOP_TIMEOUT: u64 = 5; // 5 second timeout to allow heartbeats
+    async fn fetch_plan(&mut self) -> AgwResult<Option<(Plan, String)>> {
+        const QUEUE_READY: &str = "queue:ready";
+        const QUEUE_PROCESSING: &str = "queue:processing";
+        const TIMEOUT: u64 = 5; // 5 second timeout to allow heartbeats
 
-        match self.client.brpop(QUEUE_NAME, BRPOP_TIMEOUT).await? {
+        match self
+            .client
+            .brpoplpush(QUEUE_READY, QUEUE_PROCESSING, TIMEOUT)
+            .await?
+        {
             Some(json) => {
+                info!("Received job from queue (moved to processing)");
+
                 // Parse JSON - sanitize error to avoid information disclosure
                 let plan = Plan::from_json(&json)
                     .map_err(|_| AgwError::Worker("Invalid plan JSON format".to_string()))?;
@@ -286,7 +298,7 @@ impl Worker {
                 // Validate plan structure and all tasks for security
                 plan.validate()?;
 
-                Ok(Some(plan))
+                Ok(Some((plan, json)))
             }
             None => Ok(None),
         }
@@ -305,7 +317,12 @@ impl Worker {
     }
 
     /// Handle plan execution (extracted to avoid duplication between Unix/non-Unix code paths)
-    async fn handle_plan_execution(plan: Plan, mut client: RespClient) {
+    ///
+    /// This function executes the plan and handles cleanup of the processing queue.
+    /// The `job_json` parameter is the raw JSON string used for cleanup via LREM.
+    async fn handle_plan_execution(plan: Plan, job_json: String, mut client: RespClient) {
+        const QUEUE_PROCESSING: &str = "queue:processing";
+
         match executor::execute_plan(&plan).await {
             Ok(result) => {
                 info!(
@@ -334,6 +351,18 @@ impl Worker {
                     .await
                 {
                     error!("Failed to post results for job {}: {e}", result.job_id);
+                    // Don't remove from processing queue if we couldn't post results
+                    return;
+                }
+
+                // Remove job from processing queue after successful result posting
+                info!("Job completed successfully, removing from processing queue");
+                if let Err(e) = client.lrem(QUEUE_PROCESSING, 1, &job_json).await {
+                    error!(
+                        "Failed to remove job {} from processing queue: {e}",
+                        result.job_id
+                    );
+                    // Job stays in queue:processing for monitoring/retry
                 }
             }
             Err(e) => {
@@ -347,6 +376,19 @@ impl Worker {
                     .await
                 {
                     error!("Failed to post error for job {}: {post_err}", plan.job_id);
+                    // Don't remove from processing queue if we couldn't post results
+                    return;
+                }
+
+                // Remove job from processing queue even on execution failure
+                // (we successfully posted the failure results, so job is complete)
+                info!("Job failed but results posted, removing from processing queue");
+                if let Err(e) = client.lrem(QUEUE_PROCESSING, 1, &job_json).await {
+                    error!(
+                        "Failed to remove job {} from processing queue: {e}",
+                        plan.job_id
+                    );
+                    // Job stays in queue:processing for monitoring
                 }
             }
         }

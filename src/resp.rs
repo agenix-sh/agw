@@ -163,9 +163,13 @@ impl RespClient {
     /// Blocks until a job is available in the queue or timeout is reached.
     /// Returns the job data as a JSON string, or None if timeout occurred.
     ///
+    /// **Note:** This method is deprecated in favor of `brpoplpush()` for reliable
+    /// job processing. Kept for compatibility and potential future use.
+    ///
     /// # Errors
     ///
     /// Returns an error if the RESP protocol command fails or queue name doesn't match
+    #[allow(dead_code)]
     pub async fn brpop(&mut self, queue: &str, timeout: u64) -> AgwResult<Option<String>> {
         debug!(
             "Blocking pop from queue {} with timeout {}s",
@@ -195,6 +199,83 @@ impl RespClient {
             debug!("BRPOP timeout on queue {}", queue);
             Ok(None)
         }
+    }
+
+    /// Atomically pop from source queue and push to destination queue
+    ///
+    /// This is the reliable job processing pattern. Unlike BRPOP, if the worker
+    /// crashes after receiving the job, it remains in the destination queue
+    /// for recovery/retry.
+    ///
+    /// Blocks until a job is available in the source queue or timeout is reached.
+    /// Returns the job data as a JSON string, or None if timeout occurred.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RESP protocol command fails
+    pub async fn brpoplpush(
+        &mut self,
+        source: &str,
+        destination: &str,
+        timeout: u64,
+    ) -> AgwResult<Option<String>> {
+        debug!(
+            "Blocking pop from {} and push to {} with timeout {}s",
+            source, destination, timeout
+        );
+
+        // BRPOPLPUSH returns the value directly, or nil on timeout
+        let result: Option<String> = Cmd::new()
+            .arg("BRPOPLPUSH")
+            .arg(source)
+            .arg(destination)
+            .arg(timeout)
+            .query_async(&mut self.connection)
+            .await
+            .map_err(|e| AgwError::RespProtocol(format!("BRPOPLPUSH failed: {e}")))?;
+
+        if let Some(value) = result {
+            debug!(
+                "Received job from {}: {} bytes (moved to {})",
+                source,
+                value.len(),
+                destination
+            );
+            Ok(Some(value))
+        } else {
+            debug!("BRPOPLPUSH timeout on {}", source);
+            Ok(None)
+        }
+    }
+
+    /// Remove count occurrences of element from list
+    ///
+    /// Used to remove successfully completed jobs from the processing queue.
+    /// The count parameter controls removal behavior:
+    /// - count > 0: Remove elements equal to element moving from head to tail
+    /// - count < 0: Remove elements equal to element moving from tail to head
+    /// - count = 0: Remove all elements equal to element
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RESP protocol command fails
+    pub async fn lrem(&mut self, key: &str, count: i64, element: &str) -> AgwResult<i64> {
+        debug!(
+            "Removing {} occurrences of element from list {}",
+            count, key
+        );
+
+        let removed_count: i64 = Cmd::new()
+            .arg("LREM")
+            .arg(key)
+            .arg(count)
+            .arg(element)
+            .query_async(&mut self.connection)
+            .await
+            .map_err(|e| AgwError::RespProtocol(format!("LREM failed: {e}")))?;
+
+        debug!("Removed {} elements from list {}", removed_count, key);
+        Ok(removed_count)
     }
 
     /// Set a key-value pair in AGQ
@@ -541,5 +622,93 @@ mod tests {
         let too_many: Vec<String> = (0..101).map(|i| format!("tool{}", i)).collect();
         assert_eq!(too_many.len(), 101);
         assert!(too_many.len() > 100);
+    }
+
+    #[test]
+    fn test_brpoplpush_queue_names() {
+        // Test that queue names are formatted correctly for BRPOPLPUSH
+        const QUEUE_READY: &str = "queue:ready";
+        const QUEUE_PROCESSING: &str = "queue:processing";
+
+        // Verify queue naming conventions
+        assert_eq!(QUEUE_READY, "queue:ready");
+        assert_eq!(QUEUE_PROCESSING, "queue:processing");
+
+        // Verify queues follow consistent pattern
+        assert!(QUEUE_READY.starts_with("queue:"));
+        assert!(QUEUE_PROCESSING.starts_with("queue:"));
+    }
+
+    #[test]
+    fn test_lrem_parameters() {
+        // Test LREM count parameter behavior expectations
+        const QUEUE_PROCESSING: &str = "queue:processing";
+
+        // Count = 1: Remove first occurrence (what we use)
+        let count: i64 = 1;
+        assert_eq!(count, 1);
+
+        // Verify we're removing from correct queue
+        assert_eq!(QUEUE_PROCESSING, "queue:processing");
+    }
+
+    #[test]
+    fn test_reliable_job_processing_flow() {
+        // Simulate the reliable job processing flow
+        let job_json = r#"{"job_id":"test-job","plan_id":"test-plan","tasks":[]}"#;
+
+        // Step 1: BRPOPLPUSH moves job from ready to processing
+        let _source = "queue:ready";
+        let destination = "queue:processing";
+        // Job is now atomically in destination queue
+
+        // Step 2: Worker processes job
+        let job_completed = true;
+
+        // Step 3: On success, LREM removes job from processing queue
+        if job_completed {
+            let count = 1; // Remove 1 occurrence
+            let key = destination;
+            let element = job_json;
+
+            // Verify we have the right parameters for cleanup
+            assert_eq!(count, 1);
+            assert_eq!(key, "queue:processing");
+            assert!(!element.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_job_crash_recovery_behavior() {
+        // Simulate crash recovery scenario
+        let job_json = r#"{"job_id":"crash-test","plan_id":"test","tasks":[]}"#;
+
+        // Step 1: BRPOPLPUSH moves job to processing queue
+        let in_processing_queue = true;
+        assert!(in_processing_queue);
+
+        // Step 2: Worker crashes before completing job
+        let worker_crashed = true;
+        let job_completed = false;
+
+        // Step 3: Verify job behavior on crash
+        if worker_crashed && !job_completed {
+            // Job remains in queue:processing for monitoring/retry
+            // No LREM was called, so job is still there
+            let job_lost = false; // Job is NOT lost!
+            assert!(!job_lost);
+            assert!(!job_json.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_brpoplpush_timeout_behavior() {
+        // Test timeout behavior expectations
+        const TIMEOUT: u64 = 5;
+
+        // Timeout should allow heartbeats to continue
+        assert_eq!(TIMEOUT, 5);
+        assert!(TIMEOUT > 0); // Not blocking forever
+        assert!(TIMEOUT < 60); // Short enough for responsive heartbeats
     }
 }

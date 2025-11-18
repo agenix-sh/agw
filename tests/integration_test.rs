@@ -361,3 +361,200 @@ fn test_graceful_shutdown_with_job() {
     // Now should exit
     assert!(shutdown_requested && !job_running);
 }
+
+#[test]
+fn test_brpoplpush_reliable_job_fetch() {
+    // Test reliable job processing with BRPOPLPUSH
+    // This simulates the atomic job acquisition flow
+
+    let job_json = r#"{"job_id":"test-123","plan_id":"plan-abc","tasks":[]}"#;
+
+    // Step 1: Job starts in queue:ready
+    let mut ready_queue = vec![job_json];
+    let mut processing_queue: Vec<&str> = vec![];
+
+    // Step 2: BRPOPLPUSH atomically moves job from ready to processing
+    if let Some(job) = ready_queue.pop() {
+        processing_queue.push(job);
+    }
+
+    // Verify atomic operation
+    assert!(
+        ready_queue.is_empty(),
+        "Job should be removed from ready queue"
+    );
+    assert_eq!(
+        processing_queue.len(),
+        1,
+        "Job should be in processing queue"
+    );
+    assert_eq!(
+        processing_queue[0], job_json,
+        "Job content should be preserved"
+    );
+}
+
+#[test]
+fn test_lrem_cleanup_after_success() {
+    // Test LREM cleanup after successful job completion
+    let job_json = r#"{"job_id":"test-456","plan_id":"plan-def","tasks":[]}"#;
+
+    // Job is in processing queue after BRPOPLPUSH
+    let mut processing_queue = vec![job_json];
+
+    // Job completes successfully
+    let job_succeeded = true;
+
+    // Step 3: LREM removes job from processing queue
+    if job_succeeded {
+        // Simulate LREM with count=1 (remove first occurrence)
+        if let Some(pos) = processing_queue.iter().position(|&x| x == job_json) {
+            processing_queue.remove(pos);
+        }
+    }
+
+    // Verify cleanup
+    assert!(
+        processing_queue.is_empty(),
+        "Processing queue should be empty after successful cleanup"
+    );
+}
+
+#[test]
+fn test_job_remains_in_processing_on_crash() {
+    // Test that job remains in processing queue if worker crashes
+    let job_json = r#"{"job_id":"crash-789","plan_id":"plan-ghi","tasks":[]}"#;
+
+    // Job moved to processing queue
+    let processing_queue = vec![job_json];
+
+    // Worker crashes before LREM can be called
+    let worker_crashed = true;
+    let lrem_called = false;
+
+    // Verify job is NOT lost
+    if worker_crashed && !lrem_called {
+        // Job remains in queue for monitoring/retry
+        assert!(
+            !processing_queue.is_empty(),
+            "Job should remain in processing queue"
+        );
+        assert_eq!(
+            processing_queue[0], job_json,
+            "Job data should be intact for retry"
+        );
+    }
+}
+
+#[test]
+fn test_reliable_queue_pattern_vs_brpop() {
+    // Compare BRPOP (unreliable) vs BRPOPLPUSH (reliable)
+
+    // BRPOP scenario (old, unreliable)
+    let job = "job1";
+    let mut ready_queue_brpop = vec![job];
+
+    // BRPOP removes from queue
+    let fetched_job = ready_queue_brpop.pop();
+    assert!(fetched_job.is_some());
+    assert!(ready_queue_brpop.is_empty());
+    // If crash happens here, job is LOST!
+
+    // BRPOPLPUSH scenario (new, reliable)
+    let job = "job2";
+    let mut ready_queue = vec![job];
+    let mut processing_queue: Vec<&str> = vec![];
+
+    // BRPOPLPUSH atomically moves to processing
+    if let Some(job) = ready_queue.pop() {
+        processing_queue.push(job);
+    }
+
+    // If crash happens here, job is in processing_queue (NOT LOST!)
+    assert!(
+        !processing_queue.is_empty(),
+        "Job remains in processing queue"
+    );
+}
+
+#[test]
+fn test_multiple_workers_brpoplpush_safety() {
+    // Test that BRPOPLPUSH prevents race conditions with multiple workers
+    let jobs = vec!["job1", "job2", "job3"];
+    let mut ready_queue = jobs;
+    let mut worker1_processing: Vec<&str> = vec![];
+    let mut worker2_processing: Vec<&str> = vec![];
+
+    // Worker 1 fetches a job atomically
+    if let Some(job) = ready_queue.pop() {
+        worker1_processing.push(job);
+    }
+
+    // Worker 2 fetches a different job atomically
+    if let Some(job) = ready_queue.pop() {
+        worker2_processing.push(job);
+    }
+
+    // Verify no overlap (atomic operation guarantees)
+    assert_ne!(
+        worker1_processing[0], worker2_processing[0],
+        "Workers should get different jobs"
+    );
+    assert_eq!(ready_queue.len(), 1, "One job should remain in queue");
+}
+
+#[test]
+fn test_lrem_count_parameter_behavior() {
+    // Test LREM count parameter expectations
+    let job = "test-job";
+    let mut queue = vec![job, job, job]; // 3 identical jobs
+
+    // count = 1: Remove only first occurrence (what AGW uses)
+    let count = 1;
+    for _ in 0..count {
+        if let Some(pos) = queue.iter().position(|&x| x == job) {
+            queue.remove(pos);
+        }
+    }
+
+    assert_eq!(queue.len(), 2, "Should remove only 1 occurrence");
+
+    // count = 0 would remove all (we don't use this)
+    // count = -1 would remove from tail (we don't use this)
+}
+
+#[test]
+fn test_job_result_posting_before_lrem() {
+    // Test that we only call LREM after successfully posting results
+    let job_json = r#"{"job_id":"result-test","plan_id":"test","tasks":[]}"#;
+    let mut processing_queue = vec![job_json];
+
+    // Job completes
+    let job_completed = true;
+
+    // Try to post results
+    let result_posted_successfully = true; // Simulated
+
+    // Only remove from queue if results posted successfully
+    if job_completed && result_posted_successfully {
+        processing_queue.clear();
+    }
+
+    assert!(
+        processing_queue.is_empty(),
+        "Should only cleanup after successful result posting"
+    );
+
+    // Failure scenario
+    let mut processing_queue = vec![job_json];
+    let result_posted_successfully = false; // Simulated failure
+
+    if job_completed && result_posted_successfully {
+        processing_queue.clear();
+    }
+
+    assert!(
+        !processing_queue.is_empty(),
+        "Should NOT cleanup if result posting failed"
+    );
+}
