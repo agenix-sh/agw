@@ -19,41 +19,39 @@ AGW is the worker component of the AGX ecosystem - a stateless Rust binary that 
 
 ## Nomenclature (CRITICAL)
 
-AGW uses precise terminology defined in `docs/EXECUTION-LAYERS.md`:
+AGW uses precise terminology defined in the canonical execution layers specification.
 
-### 1. Task (Atomic execution unit)
-- Single tool/AU call: `stdin → tool → stdout`
-- Example: `sort -r`, `agx-ocr image.png`
-- Executed by AGW
-- **Code**: `Task` struct in `src/plan.rs`
+**Canonical Documentation:**
+- **Execution Layers**: `agenix/docs/architecture/execution-layers.md` - authoritative 5-layer model
+- **Job Schema**: `agenix/docs/architecture/job-schema.md` - field-level specification for Jobs
+- **Schema Files**: `agenix/specs/job.schema.json` - machine-readable JSON schema
 
-### 2. Plan (Ordered list of Tasks)
-- JSON structure with ordered tasks
-- Reusable definition (stored in AGQ)
-- Example: "Extract text from image, then summarize"
-- Created by AGX
-- **Code**: `Plan` struct in `src/plan.rs`
+**The Five Execution Layers (Summary):**
+1. **Task** - Atomic execution unit (single tool/AU call)
+2. **Plan** - Ordered list of Tasks (reusable template)
+3. **Job** - Runtime instance of a Plan (what AGW executes)
+4. **Action** - Many Jobs in parallel (same Plan, different inputs)
+5. **Workflow** - Multi-Action orchestration (future)
 
-### 3. Job (Execution of a Plan with specific data)
-- Runtime instance of a Plan
-- Has unique `job_id`, references `plan_id`
-- Contains input data to process
-- Tracked by AGQ, executed by single AGW
-- Has status, timestamps, logs
-- **Code**: `Job` struct (to be implemented in AGW-012)
+**AGW's Role:**
+- AGW executes **Jobs** (Layer 3) pulled from AGQ
+- Each Job contains **Tasks** (Layer 1) to execute sequentially
+- AGW never sees Plans directly (those are stored in AGQ)
+- AGW reports Job status back to AGQ
 
-### 4. Action (Many Jobs in parallel)
-- Fan-out execution of same Plan with different inputs
-- Created by User/AGX
-- Managed by AGQ
-- Executed by many AGWs (one Job per AGW)
-- **Status**: Not yet implemented
+**Critical Terminology Rules:**
+- ✅ Use "Task" not "step"
+- ✅ Use "Job" for runtime execution instances
+- ✅ Use "Plan" only when referring to templates stored in AGQ
+- ❌ Never use "step", "instruction", "command" (these are ambiguous)
 
-### 5. Workflow (Future)
-- Multi-step orchestration with conditional logic
-- **Status**: Not yet implemented
+**When implementing code:**
+- Variable names: `task_count` not `step_count`
+- Function names: `execute_task()` not `execute_step()`
+- Struct fields: `job.tasks` not `job.steps`
+- Error messages: "Task 3 failed" not "Step 3 failed"
 
-**IMPORTANT**: Always use these exact terms in code, comments, and documentation. Do not use "step" (use "task"), do not conflate "plan" with "job".
+For complete nomenclature details, see `agenix/docs/architecture/execution-layers.md`.
 
 ---
 
