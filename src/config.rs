@@ -22,6 +22,10 @@ pub struct Config {
     #[arg(short = 'w', long, env = "WORKER_ID")]
     pub worker_id: Option<String>,
 
+    /// Worker name for identification (default: auto-generated)
+    #[arg(short = 'n', long, env = "AGW_WORKER_NAME")]
+    pub name: Option<String>,
+
     /// Heartbeat interval in seconds
     #[arg(long, env = "HEARTBEAT_INTERVAL", default_value = "30")]
     pub heartbeat_interval: u64,
@@ -59,6 +63,11 @@ impl Config {
         // Validate worker ID if provided
         if let Some(ref id) = self.worker_id {
             validate_worker_id(id)?;
+        }
+
+        // Validate worker name if provided
+        if let Some(ref name) = self.name {
+            validate_worker_name(name)?;
         }
 
         // Validate intervals
@@ -162,6 +171,41 @@ pub fn validate_worker_id(id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Validate worker name format
+///
+/// Worker names are human-readable identifiers for operational visibility.
+/// They follow the same rules as worker IDs for consistency.
+///
+/// # Errors
+///
+/// Returns an error if the worker name is invalid
+pub fn validate_worker_name(name: &str) -> anyhow::Result<()> {
+    if name.is_empty() {
+        anyhow::bail!("Worker name cannot be empty");
+    }
+
+    if name.len() > 64 {
+        anyhow::bail!("Worker name cannot exceed 64 characters");
+    }
+
+    // Check for control characters
+    if name.chars().any(char::is_control) {
+        anyhow::bail!("Worker name contains invalid characters");
+    }
+
+    // Only allow alphanumeric, hyphens, and underscores
+    if !name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        anyhow::bail!(
+            "Worker name can only contain alphanumeric characters, hyphens, and underscores"
+        );
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,5 +268,48 @@ mod tests {
         assert!(validate_worker_id("worker/1").is_err());
         assert!(validate_worker_id("worker;1").is_err());
         assert!(validate_worker_id("worker@1").is_err());
+    }
+
+    #[test]
+    fn test_validate_worker_name_valid() {
+        assert!(validate_worker_name("worker-1").is_ok());
+        assert!(validate_worker_name("worker-2").is_ok());
+        assert!(validate_worker_name("cpu-worker-a").is_ok());
+        assert!(validate_worker_name("gpu_worker_1").is_ok());
+        assert!(validate_worker_name("priority-worker").is_ok());
+        assert!(validate_worker_name("WORKER123").is_ok());
+    }
+
+    #[test]
+    fn test_validate_worker_name_empty() {
+        assert!(validate_worker_name("").is_err());
+    }
+
+    #[test]
+    fn test_validate_worker_name_too_long() {
+        let long_name = "a".repeat(65);
+        assert!(validate_worker_name(&long_name).is_err());
+    }
+
+    #[test]
+    fn test_validate_worker_name_invalid_chars() {
+        assert!(validate_worker_name("worker.1").is_err());
+        assert!(validate_worker_name("worker/1").is_err());
+        assert!(validate_worker_name("worker;1").is_err());
+        assert!(validate_worker_name("worker@1").is_err());
+        assert!(validate_worker_name("worker 1").is_err()); // Space
+        assert!(validate_worker_name("worker:1").is_err()); // Colon
+    }
+
+    #[test]
+    fn test_validate_worker_name_security() {
+        // Path traversal
+        assert!(validate_worker_name("../worker").is_err());
+        assert!(validate_worker_name("worker/../../etc").is_err());
+
+        // Command injection
+        assert!(validate_worker_name("worker;rm -rf /").is_err());
+        assert!(validate_worker_name("worker|cat").is_err());
+        assert!(validate_worker_name("worker&whoami").is_err());
     }
 }

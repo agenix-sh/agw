@@ -11,6 +11,7 @@ use uuid::Uuid;
 pub struct Worker {
     config: Config,
     id: String,
+    name: String,
     client: RespClient,
 }
 
@@ -33,7 +34,18 @@ impl Worker {
             .clone()
             .unwrap_or_else(|| format!("agw-{}", Uuid::new_v4()));
 
-        info!("Initializing worker with ID: {}", worker_id);
+        // Generate or use provided worker name
+        let worker_name = config.name.clone().unwrap_or_else(|| {
+            // Auto-generate name from worker ID (use "worker-" prefix + first 12 chars)
+            // This provides uniqueness while being more readable than full UUID
+            let short_id = worker_id.chars().take(18).collect::<String>();
+            format!("worker-{}", short_id.replace("agw-", ""))
+        });
+
+        info!(
+            "Initializing worker with ID: {} (name: {})",
+            worker_id, worker_name
+        );
 
         // Connect to AGQ
         let mut client = RespClient::connect(&config.agq_address).await?;
@@ -54,6 +66,7 @@ impl Worker {
         Ok(Self {
             config,
             id: worker_id,
+            name: worker_name,
             client,
         })
     }
@@ -316,6 +329,13 @@ impl Worker {
         &self.id
     }
 
+    /// Get the worker name
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     /// Handle plan execution (extracted to avoid duplication between Unix/non-Unix code paths)
     ///
     /// This function executes the plan and handles cleanup of the processing queue.
@@ -405,6 +425,21 @@ mod tests {
         let id = format!("agw-{}", Uuid::new_v4());
         assert!(id.starts_with("agw-"));
         assert!(id.len() > 4);
+    }
+
+    #[test]
+    fn test_worker_name_generation() {
+        // Test that auto-generated worker names follow the pattern
+        let worker_id = format!("agw-{}", Uuid::new_v4());
+        let short_id = worker_id.chars().take(18).collect::<String>();
+        let name = format!("worker-{}", short_id.replace("agw-", ""));
+
+        assert!(name.starts_with("worker-"));
+        assert!(name.len() > 7); // "worker-" + at least some ID chars
+
+        // Verify it validates correctly
+        use crate::config::validate_worker_name;
+        assert!(validate_worker_name(&name).is_ok());
     }
 
     #[test]
