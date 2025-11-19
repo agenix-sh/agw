@@ -36,17 +36,114 @@ const DANGEROUS_UNICODE: &[char] = &[
     '\u{FEFF}', // ZERO WIDTH NO-BREAK SPACE
 ];
 
-/// Execution plan containing multiple tasks
+/// Job metadata (Execution Layer 3)
 ///
-/// Plans are fetched from AGQ via BRPOPLPUSH on the `queue:ready` list.
-/// Jobs are atomically moved to `queue:processing` to prevent job loss on worker crashes.
-/// Each plan contains an ordered list of tasks to execute sequentially.
+/// A Job is the runtime instance of a Plan execution. It contains the plan reference
+/// and input data for variable substitution in tasks.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[allow(clippy::struct_field_names)] // Field names match schema specification
-pub struct Plan {
+pub struct Job {
     /// Unique job identifier for this execution instance
     pub job_id: String,
 
+    /// Reference to the plan to execute
+    pub plan_id: String,
+
+    /// Input data for variable substitution in tasks (e.g., {{input.path}})
+    #[serde(default)]
+    pub input: serde_json::Value,
+
+    /// Job status (pending, running, completed, failed)
+    #[serde(default = "default_job_status")]
+    pub status: String,
+}
+
+fn default_job_status() -> String {
+    "pending".to_string()
+}
+
+/// Substitute {{input.field}} variables in a string
+///
+/// # Errors
+///
+/// Returns an error if a referenced field doesn't exist in the input data
+fn substitute_variables(text: &str, input: &serde_json::Value) -> AgwResult<String> {
+    use regex::Regex;
+
+    // Match {{input.fieldname}} pattern
+    let re = Regex::new(r"\{\{input\.([a-zA-Z0-9_]+)\}\}").unwrap();
+
+    let mut result = text.to_string();
+    let mut missing_fields = Vec::new();
+
+    for cap in re.captures_iter(text) {
+        let full_match = &cap[0];
+        let field_name = &cap[1];
+
+        // Look up the field in input
+        if let Some(value) = input.get(field_name) {
+            // Convert value to string
+            let replacement = match value {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                serde_json::Value::Null => String::new(),
+                _ => {
+                    return Err(AgwError::Worker(format!(
+                        "Input field '{}' has unsupported type (must be string, number, or boolean)",
+                        field_name
+                    )));
+                }
+            };
+
+            result = result.replace(full_match, &replacement);
+        } else {
+            missing_fields.push(field_name.to_string());
+        }
+    }
+
+    if !missing_fields.is_empty() {
+        return Err(AgwError::Worker(format!(
+            "Missing required input fields: {}",
+            missing_fields.join(", ")
+        )));
+    }
+
+    Ok(result)
+}
+
+impl Job {
+    /// Parse a job from JSON string
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the JSON is invalid or doesn't match the Job schema
+    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(json)
+    }
+
+    /// Validate the job structure
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if job_id or plan_id contain invalid characters
+    pub fn validate(&self) -> AgwResult<()> {
+        // Validate job_id
+        validate_string_field(&self.job_id, "job_id", MAX_JOB_ID_LEN, true)?;
+
+        // Validate plan_id
+        validate_string_field(&self.plan_id, "plan_id", MAX_PLAN_ID_LEN, true)?;
+
+        Ok(())
+    }
+}
+
+/// Execution plan containing multiple tasks (Execution Layer 2)
+///
+/// Plans are templates that can be reused across multiple Jobs.
+/// They define the ordered sequence of tasks to execute.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[allow(clippy::struct_field_names)] // Field names match schema specification
+pub struct Plan {
     /// Stable plan identifier (reused across multiple job executions)
     pub plan_id: String,
 
@@ -111,9 +208,6 @@ impl Plan {
     /// - Task numbers are not contiguous starting at 1
     /// - `input_from_task` references are invalid
     pub fn validate(&self) -> AgwResult<()> {
-        // Validate job_id
-        validate_string_field(&self.job_id, "job_id", MAX_JOB_ID_LEN, true)?;
-
         // Validate plan_id
         validate_string_field(&self.plan_id, "plan_id", MAX_PLAN_ID_LEN, true)?;
 
@@ -168,6 +262,31 @@ impl Plan {
 }
 
 impl Task {
+    /// Substitute input variables in task arguments
+    ///
+    /// Replaces {{input.field}} patterns with values from the job input data.
+    /// For example, "{{input.path}}" becomes "/tmp" if job.input = {"path": "/tmp"}
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a referenced field doesn't exist in the input data
+    pub fn substitute_input(&self, input: &serde_json::Value) -> AgwResult<Self> {
+        let mut substituted_args = Vec::new();
+
+        for arg in &self.args {
+            let substituted_arg = substitute_variables(arg, input)?;
+            substituted_args.push(substituted_arg);
+        }
+
+        Ok(Self {
+            task_number: self.task_number,
+            command: self.command.clone(),
+            args: substituted_args,
+            input_from_task: self.input_from_task,
+            timeout_secs: self.timeout_secs,
+        })
+    }
+
     /// Validate the task fields
     ///
     /// # Errors
@@ -283,7 +402,6 @@ mod tests {
     #[test]
     fn test_plan_creation() {
         let plan = Plan {
-            job_id: "job-123".to_string(),
             plan_id: "plan-456".to_string(),
             plan_description: Some("Test plan".to_string()),
             tasks: vec![Task {
@@ -295,7 +413,6 @@ mod tests {
             }],
         };
 
-        assert_eq!(plan.job_id, "job-123");
         assert_eq!(plan.plan_id, "plan-456");
         assert_eq!(plan.tasks.len(), 1);
     }
@@ -303,7 +420,6 @@ mod tests {
     #[test]
     fn test_plan_json_serialization() {
         let plan = Plan {
-            job_id: "job-123".to_string(),
             plan_id: "plan-456".to_string(),
             plan_description: None,
             tasks: vec![Task {
@@ -323,7 +439,6 @@ mod tests {
     #[test]
     fn test_plan_with_multiple_steps() {
         let plan = Plan {
-            job_id: "job-123".to_string(),
             plan_id: "plan-456".to_string(),
             plan_description: Some("Multi-step plan".to_string()),
             tasks: vec![
@@ -351,7 +466,6 @@ mod tests {
     #[test]
     fn test_plan_validation_success() {
         let plan = Plan {
-            job_id: "job-123".to_string(),
             plan_id: "plan-456".to_string(),
             plan_description: Some("Valid plan".to_string()),
             tasks: vec![
@@ -378,7 +492,6 @@ mod tests {
     #[test]
     fn test_plan_validation_empty_tasks() {
         let plan = Plan {
-            job_id: "job-123".to_string(),
             plan_id: "plan-456".to_string(),
             plan_description: None,
             tasks: vec![],
@@ -390,7 +503,6 @@ mod tests {
     #[test]
     fn test_plan_validation_non_contiguous_tasks() {
         let plan = Plan {
-            job_id: "job-123".to_string(),
             plan_id: "plan-456".to_string(),
             plan_description: None,
             tasks: vec![
@@ -417,7 +529,6 @@ mod tests {
     #[test]
     fn test_plan_validation_invalid_input_from_task() {
         let plan = Plan {
-            job_id: "job-123".to_string(),
             plan_id: "plan-456".to_string(),
             plan_description: None,
             tasks: vec![

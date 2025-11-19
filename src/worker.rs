@@ -161,27 +161,27 @@ impl Worker {
                         }
                     }
 
-                    // Plan fetch
-                    plan_result = self.fetch_plan(), if current_job.is_none() && !shutdown_requested => {
-                    match plan_result {
-                        Ok(Some((plan, job_json))) => {
-                            debug!("Received plan {} (job {}) with {} tasks",
-                                plan.plan_id, plan.job_id, plan.tasks.len());
+                    // Job fetch and preparation
+                    job_result = self.fetch_and_prepare_job(), if current_job.is_none() && !shutdown_requested => {
+                    match job_result {
+                        Ok(Some((job_id, plan, job_id_raw))) => {
+                            debug!("Prepared job {} (plan {}) with {} tasks",
+                                job_id, plan.plan_id, plan.tasks.len());
 
                             // Clone client for the spawned task
                             let client = self.client.clone();
 
                             // Spawn plan execution on a separate task to allow heartbeats to continue
-                            let plan_handle = tokio::spawn(Self::handle_plan_execution(plan, job_json, client));
+                            let plan_handle = tokio::spawn(Self::handle_plan_execution(job_id, plan, job_id_raw, client));
 
                             current_job = Some(plan_handle);
                         }
                         Ok(None) => {
                             // Timeout - continue loop
-                            debug!("Plan fetch timeout, continuing...");
+                            debug!("Job fetch timeout, continuing...");
                         }
                         Err(e) => {
-                            error!("Failed to fetch plan: {e}");
+                            error!("Failed to fetch and prepare job: {e}");
                             return Err(e);
                         }
                     }
@@ -208,24 +208,24 @@ impl Worker {
                         }
                     }
 
-                    // Plan fetch (no shutdown handling on Windows yet)
-                    plan_result = self.fetch_plan(), if current_job.is_none() => {
-                        match plan_result {
-                            Ok(Some((plan, job_json))) => {
-                                debug!("Received plan {} (job {}) with {} tasks",
-                                    plan.plan_id, plan.job_id, plan.tasks.len());
+                    // Job fetch and preparation (no shutdown handling on Windows yet)
+                    job_result = self.fetch_and_prepare_job(), if current_job.is_none() => {
+                        match job_result {
+                            Ok(Some((job_id, plan, job_id_raw))) => {
+                                debug!("Prepared job {} (plan {}) with {} tasks",
+                                    job_id, plan.plan_id, plan.tasks.len());
 
                                 let client = self.client.clone();
 
-                                let plan_handle = tokio::spawn(Self::handle_plan_execution(plan, job_json, client));
+                                let plan_handle = tokio::spawn(Self::handle_plan_execution(job_id, plan, job_id_raw, client));
 
                                 current_job = Some(plan_handle);
                             }
                             Ok(None) => {
-                                debug!("Plan fetch timeout, continuing...");
+                                debug!("Job fetch timeout, continuing...");
                             }
                             Err(e) => {
-                                error!("Failed to fetch plan: {e}");
+                                error!("Failed to fetch and prepare job: {e}");
                                 return Err(e);
                             }
                         }
@@ -268,50 +268,67 @@ impl Worker {
         Ok(())
     }
 
-    /// Fetch a plan from the queue using reliable BRPOPLPUSH
+    /// Fetch and prepare a job for execution
     ///
-    /// This atomically moves the job from `queue:ready` to `queue:processing`,
-    /// ensuring the job is not lost if the worker crashes during execution.
-    /// Returns both the parsed Plan and the raw JSON (needed for cleanup after
-    /// successful execution).
+    /// New workflow (AGQ #46):
+    /// 1. Pop job_id from queue (BRPOPLPUSH for reliability)
+    /// 2. Fetch job metadata (JOB.GET)
+    /// 3. Fetch plan template (PLAN.GET)
+    /// 4. Substitute input variables in tasks
+    ///
+    /// Returns (job_id, plan_with_substituted_inputs, job_json) tuple
     ///
     /// # Errors
     ///
-    /// Returns an error if BRPOPLPUSH fails, plan JSON is invalid, validation fails,
-    /// or job ID is invalid
-    async fn fetch_plan(&mut self) -> AgwResult<Option<(Plan, String)>> {
+    /// Returns an error if fetching fails, JSON is invalid, or validation fails
+    async fn fetch_and_prepare_job(&mut self) -> AgwResult<Option<(String, Plan, String)>> {
+        use crate::plan::Job;
+
         const QUEUE_READY: &str = "queue:ready";
         const QUEUE_PROCESSING: &str = "queue:processing";
         const TIMEOUT: u64 = 5; // 5 second timeout to allow heartbeats
 
+        // Step 1: Pop job_id from queue
         match self
             .client
             .brpoplpush(QUEUE_READY, QUEUE_PROCESSING, TIMEOUT)
             .await?
         {
-            Some(json) => {
-                info!("Received job from queue (moved to processing)");
+            Some(job_id_json) => {
+                info!("Received job_id from queue (moved to processing)");
 
-                // Parse JSON - sanitize error to avoid information disclosure
-                let plan = Plan::from_json(&json)
+                // Step 2: Get job metadata
+                let job_json = self.client.job_get(&job_id_json).await?;
+                let job = Job::from_json(&job_json)
+                    .map_err(|_| AgwError::Worker("Invalid job JSON format".to_string()))?;
+
+                job.validate()?;
+
+                info!("Fetched job {} (plan_id: {})", job.job_id, job.plan_id);
+
+                // Step 3: Get plan template
+                let plan_json = self.client.plan_get(&job.plan_id).await?;
+                let mut plan = Plan::from_json(&plan_json)
                     .map_err(|_| AgwError::Worker("Invalid plan JSON format".to_string()))?;
 
-                // Validate job ID early to prevent processing plans with invalid IDs
-                // This catches issues before plan execution rather than after
-                if plan.job_id.is_empty() {
-                    return Err(AgwError::Worker("Job ID cannot be empty".to_string()));
-                }
-                if plan.job_id.contains(':') {
-                    return Err(AgwError::Worker(format!(
-                        "Job ID contains invalid character (colon): {}",
-                        plan.job_id
-                    )));
-                }
-
-                // Validate plan structure and all tasks for security
                 plan.validate()?;
 
-                Ok(Some((plan, json)))
+                info!(
+                    "Fetched plan {} with {} tasks",
+                    plan.plan_id,
+                    plan.tasks.len()
+                );
+
+                // Step 4: Substitute input variables in tasks
+                let mut substituted_tasks = Vec::new();
+                for task in &plan.tasks {
+                    let substituted_task = task.substitute_input(&job.input)?;
+                    substituted_tasks.push(substituted_task);
+                }
+
+                plan.tasks = substituted_tasks;
+
+                Ok(Some((job.job_id, plan, job_id_json)))
             }
             None => Ok(None),
         }
@@ -339,11 +356,16 @@ impl Worker {
     /// Handle plan execution (extracted to avoid duplication between Unix/non-Unix code paths)
     ///
     /// This function executes the plan and handles cleanup of the processing queue.
-    /// The `job_json` parameter is the raw JSON string used for cleanup via LREM.
-    async fn handle_plan_execution(plan: Plan, job_json: String, mut client: RespClient) {
+    /// The `job_id_raw` parameter is the raw job_id string used for cleanup via LREM.
+    async fn handle_plan_execution(
+        job_id: String,
+        plan: Plan,
+        job_id_raw: String,
+        mut client: RespClient,
+    ) {
         const QUEUE_PROCESSING: &str = "queue:processing";
 
-        match executor::execute_plan(&plan).await {
+        match executor::execute_plan(&job_id, &plan).await {
             Ok(result) => {
                 info!(
                     "Plan {} (job {}) completed: {} tasks executed, success={}",
@@ -377,7 +399,7 @@ impl Worker {
 
                 // Remove job from processing queue after successful result posting
                 info!("Job completed successfully, removing from processing queue");
-                if let Err(e) = client.lrem(QUEUE_PROCESSING, 1, &job_json).await {
+                if let Err(e) = client.lrem(QUEUE_PROCESSING, 1, &job_id_raw).await {
                     error!(
                         "Failed to remove job {} from processing queue: {e}",
                         result.job_id
@@ -392,10 +414,10 @@ impl Worker {
                 // Note: Execution errors occur before any tasks run, so no partial results exist
                 let error_msg = format!("Execution error: {e}");
                 if let Err(post_err) = client
-                    .post_job_result(&plan.job_id, "", &error_msg, "failed")
+                    .post_job_result(&job_id, "", &error_msg, "failed")
                     .await
                 {
-                    error!("Failed to post error for job {}: {post_err}", plan.job_id);
+                    error!("Failed to post error for job {}: {post_err}", job_id);
                     // Don't remove from processing queue if we couldn't post results
                     return;
                 }
@@ -403,11 +425,8 @@ impl Worker {
                 // Remove job from processing queue even on execution failure
                 // (we successfully posted the failure results, so job is complete)
                 info!("Job failed but results posted, removing from processing queue");
-                if let Err(e) = client.lrem(QUEUE_PROCESSING, 1, &job_json).await {
-                    error!(
-                        "Failed to remove job {} from processing queue: {e}",
-                        plan.job_id
-                    );
+                if let Err(e) = client.lrem(QUEUE_PROCESSING, 1, &job_id_raw).await {
+                    error!("Failed to remove job {} from processing queue: {e}", job_id);
                     // Job stays in queue:processing for monitoring
                 }
             }

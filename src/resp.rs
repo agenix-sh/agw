@@ -278,6 +278,50 @@ impl RespClient {
         Ok(removed_count)
     }
 
+    /// Get job metadata from AGQ
+    ///
+    /// Fetches job information including job_id, plan_id, input data, and status.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RESP protocol command fails or job doesn't exist
+    pub async fn job_get(&mut self, job_id: &str) -> AgwResult<String> {
+        debug!("Fetching job metadata for job_id: {}", job_id);
+
+        let job_key = format!("job:{}", job_id);
+        let json: String = Cmd::new()
+            .arg("GET")
+            .arg(&job_key)
+            .query_async(&mut self.connection)
+            .await
+            .map_err(|e| AgwError::RespProtocol(format!("JOB.GET failed: {e}")))?;
+
+        debug!("Retrieved job metadata: {} bytes", json.len());
+        Ok(json)
+    }
+
+    /// Get plan from AGQ
+    ///
+    /// Fetches plan template including tasks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RESP protocol command fails or plan doesn't exist
+    pub async fn plan_get(&mut self, plan_id: &str) -> AgwResult<String> {
+        debug!("Fetching plan for plan_id: {}", plan_id);
+
+        let plan_key = format!("plan:{}", plan_id);
+        let json: String = Cmd::new()
+            .arg("GET")
+            .arg(&plan_key)
+            .query_async(&mut self.connection)
+            .await
+            .map_err(|e| AgwError::RespProtocol(format!("PLAN.GET failed: {e}")))?;
+
+        debug!("Retrieved plan: {} bytes", json.len());
+        Ok(json)
+    }
+
     /// Set a key-value pair in AGQ
     ///
     /// # Errors
