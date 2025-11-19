@@ -294,24 +294,51 @@ impl Worker {
             .brpoplpush(QUEUE_READY, QUEUE_PROCESSING, TIMEOUT)
             .await?
         {
-            Some(job_id_json) => {
+            Some(job_id_raw) => {
                 info!("Received job_id from queue (moved to processing)");
 
                 // Step 2: Get job metadata
-                let job_json = self.client.job_get(&job_id_json).await?;
-                let job = Job::from_json(&job_json)
-                    .map_err(|_| AgwError::Worker("Invalid job JSON format".to_string()))?;
+                let job_json = self.client.job_get(&job_id_raw).await.map_err(|e| {
+                    AgwError::Worker(format!(
+                        "Failed to fetch job metadata for '{}': {}",
+                        job_id_raw, e
+                    ))
+                })?;
 
-                job.validate()?;
+                let job = Job::from_json(&job_json).map_err(|e| {
+                    AgwError::Worker(format!(
+                        "Failed to parse job JSON for '{}': {}",
+                        job_id_raw, e
+                    ))
+                })?;
+
+                job.validate().map_err(|e| {
+                    AgwError::Worker(format!("Job validation failed for '{}': {}", job.job_id, e))
+                })?;
 
                 info!("Fetched job {} (plan_id: {})", job.job_id, job.plan_id);
 
                 // Step 3: Get plan template
-                let plan_json = self.client.plan_get(&job.plan_id).await?;
-                let mut plan = Plan::from_json(&plan_json)
-                    .map_err(|_| AgwError::Worker("Invalid plan JSON format".to_string()))?;
+                let plan_json = self.client.plan_get(&job.plan_id).await.map_err(|e| {
+                    AgwError::Worker(format!(
+                        "Failed to fetch plan '{}' for job '{}': {}",
+                        job.plan_id, job.job_id, e
+                    ))
+                })?;
 
-                plan.validate()?;
+                let mut plan = Plan::from_json(&plan_json).map_err(|e| {
+                    AgwError::Worker(format!(
+                        "Failed to parse plan JSON for '{}': {}",
+                        job.plan_id, e
+                    ))
+                })?;
+
+                plan.validate().map_err(|e| {
+                    AgwError::Worker(format!(
+                        "Plan validation failed for '{}': {}",
+                        plan.plan_id, e
+                    ))
+                })?;
 
                 info!(
                     "Fetched plan {} with {} tasks",
@@ -322,13 +349,18 @@ impl Worker {
                 // Step 4: Substitute input variables in tasks
                 let mut substituted_tasks = Vec::new();
                 for task in &plan.tasks {
-                    let substituted_task = task.substitute_input(&job.input)?;
+                    let substituted_task = task.substitute_input(&job.input).map_err(|e| {
+                        AgwError::Worker(format!(
+                            "Failed to substitute input variables for task {} in job '{}': {}",
+                            task.task_number, job.job_id, e
+                        ))
+                    })?;
                     substituted_tasks.push(substituted_task);
                 }
 
                 plan.tasks = substituted_tasks;
 
-                Ok(Some((job.job_id, plan, job_id_json)))
+                Ok(Some((job.job_id, plan, job_id_raw)))
             }
             None => Ok(None),
         }

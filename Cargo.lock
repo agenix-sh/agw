@@ -9,6 +9,7 @@ dependencies = [
  "anyhow",
  "clap",
  "mockall",
+ "once_cell",
  "redis",
  "regex",
  "serde",
