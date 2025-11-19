@@ -106,11 +106,11 @@ impl PlanResult {
 /// is safe because `task_results` is guaranteed to be non-empty when we check success.
 ///
 /// Note: This function will halt on first failure and return partial results
-pub async fn execute_plan(plan: &Plan) -> AgwResult<PlanResult> {
+pub async fn execute_plan(job_id: &str, plan: &Plan) -> AgwResult<PlanResult> {
     info!(
         "Executing plan {} (job {}) with {} tasks",
         plan.plan_id,
-        plan.job_id,
+        job_id,
         plan.tasks.len()
     );
 
@@ -151,7 +151,7 @@ pub async fn execute_plan(plan: &Plan) -> AgwResult<PlanResult> {
         }
     }
 
-    let plan_result = PlanResult::new(plan.job_id.clone(), plan.plan_id.clone(), task_results);
+    let plan_result = PlanResult::new(job_id.to_string(), plan.plan_id.clone(), task_results);
 
     info!(
         "Plan {} completed: {} tasks executed, success={}",
@@ -317,7 +317,6 @@ mod tests {
     #[tokio::test]
     async fn test_execute_task_plan() {
         let plan = Plan {
-            job_id: "job-123".to_string(),
             plan_id: "plan-456".to_string(),
             plan_description: None,
             tasks: vec![Task {
@@ -329,7 +328,7 @@ mod tests {
             }],
         };
 
-        let result = execute_plan(&plan).await.unwrap();
+        let result = execute_plan("job-123", &plan).await.unwrap();
         assert_eq!(result.job_id, "job-123");
         assert_eq!(result.plan_id, "plan-456");
         assert_eq!(result.task_results.len(), 1);
@@ -341,7 +340,6 @@ mod tests {
     #[tokio::test]
     async fn test_execute_multi_step_plan() {
         let plan = Plan {
-            job_id: "job-123".to_string(),
             plan_id: "plan-456".to_string(),
             plan_description: Some("Multi-step test".to_string()),
             tasks: vec![
@@ -362,7 +360,7 @@ mod tests {
             ],
         };
 
-        let result = execute_plan(&plan).await.unwrap();
+        let result = execute_plan("job-123", &plan).await.unwrap();
         assert_eq!(result.task_results.len(), 2);
         assert!(result.task_results[0].success);
         assert!(result.task_results[1].success);
@@ -372,7 +370,6 @@ mod tests {
     #[tokio::test]
     async fn test_execute_plan_with_failure() {
         let plan = Plan {
-            job_id: "job-123".to_string(),
             plan_id: "plan-456".to_string(),
             plan_description: None,
             tasks: vec![
@@ -393,7 +390,7 @@ mod tests {
             ],
         };
 
-        let result = execute_plan(&plan).await.unwrap();
+        let result = execute_plan("job-123", &plan).await.unwrap();
         // Should only execute first task
         assert_eq!(result.task_results.len(), 1);
         assert_eq!(result.task_results[0].exit_code, 42);
@@ -404,7 +401,6 @@ mod tests {
     #[tokio::test]
     async fn test_execute_plan_with_timeout() {
         let plan = Plan {
-            job_id: "job-123".to_string(),
             plan_id: "plan-456".to_string(),
             plan_description: None,
             tasks: vec![Task {
@@ -416,7 +412,7 @@ mod tests {
             }],
         };
 
-        let result = execute_plan(&plan).await.unwrap();
+        let result = execute_plan("job-123", &plan).await.unwrap();
         assert_eq!(result.task_results.len(), 1);
         assert!(!result.task_results[0].success);
         assert!(!result.success);
@@ -425,7 +421,6 @@ mod tests {
     #[tokio::test]
     async fn test_execute_plan_with_stdin_piping() {
         let plan = Plan {
-            job_id: "job-123".to_string(),
             plan_id: "plan-456".to_string(),
             plan_description: None,
             tasks: vec![
@@ -453,7 +448,7 @@ mod tests {
             ],
         };
 
-        let result = execute_plan(&plan).await.unwrap();
+        let result = execute_plan("job-123", &plan).await.unwrap();
         assert_eq!(result.task_results.len(), 3);
         assert!(result.success);
 
@@ -466,7 +461,6 @@ mod tests {
     #[tokio::test]
     async fn test_execute_invalid_command() {
         let plan = Plan {
-            job_id: "job-123".to_string(),
             plan_id: "plan-456".to_string(),
             plan_description: None,
             tasks: vec![Task {
@@ -478,7 +472,7 @@ mod tests {
             }],
         };
 
-        let result = execute_plan(&plan).await;
+        let result = execute_plan("job-123", &plan).await;
         assert!(result.is_err());
     }
 
